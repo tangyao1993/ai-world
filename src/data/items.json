@@ -1,0 +1,30 @@
+{
+  "plant": {
+    "id": "plant",
+    "name": "Plante",
+    "price": 2,
+    "texture": "items/plants",
+    "frame": 4
+  },
+  "tomato": {
+    "id": "tomato",
+    "name": "Tomato",
+    "price": 3,
+    "texture": "items/plants",
+    "frame": 0
+  },
+  "log_beech": {
+    "id": "log_beech",
+    "name": "Beech log",
+    "price": 5,
+    "texture": "items/log_beech",
+    "frame": 0
+  },
+  "log_maple": {
+    "id": "log_maple",
+    "name": "Maple log",
+    "price": 15,
+    "texture": "items/log_maple",
+    "frame": 0
+  }
+}

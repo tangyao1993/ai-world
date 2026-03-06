@@ -1,0 +1,384 @@
+declare global {
+  interface Window {
+    io: any;
+  }
+}
+
+import "phaser";
+import Player from "../models/Player";
+import OtherPlayer from "../models/OtherPlayer";
+import ResourceEntity from "../models/ResourceEntity";
+import Npc from "../models/Npc";
+import Entity from "../models/Entity";
+import EventDispatcher from "../services/EventDispatcher";
+import EntityActionManager from "../services/EntityActionManager";
+import EntityActionProcessor from "../services/EntityActionProcessor";
+import io from "socket.io-client";
+import SkillsManager from "../services/SkillsManager";
+import { ActionType } from "../types/Actions";
+import ServerConnectorService from "../services/ServerConnectorService";
+import GameState from "../services/GameState";
+import NpcActionExecutor, {
+  NpcActionExecutionResult,
+} from "../services/NpcActionExecutor";
+import { createNpcSnapshot, NpcSnapshot } from "../types/Npc";
+
+type MapLayer = Phaser.Tilemaps.TilemapLayer;
+
+export default class WorldScene extends Phaser.Scene {
+  TILE_SIZE: number = 32;
+
+  server: any;
+  emitter: EventDispatcher = EventDispatcher.getInstance();
+  entityActions: EntityActionManager;
+  npcActionExecutor!: NpcActionExecutor;
+  gameState: GameState = new GameState(this, this.emitter);
+
+  navMeshPlugin: any;
+  navMesh: any;
+  marker: Phaser.GameObjects.Graphics;
+  map: Phaser.Tilemaps.Tilemap;
+  mapLayers: { [key: string]: MapLayer } = {};
+  currentSelection: Entity | null;
+
+  // Entities
+  player: Player;
+  otherPlayers: { [key: string]: OtherPlayer } = {};
+  npcs: { [key: string]: Npc } = {};
+  resources: { [key: string]: ResourceEntity } = {};
+
+  constructor() {
+    super("WorldScene");
+  }
+
+  create() {
+    this.input.setDefaultCursor("url(assets/ui/cursor-brown.cur), default");
+    this.entityActions = EntityActionManager.init(this);
+
+    this._createMap();
+    this._createAnims();
+    this.npcActionExecutor = new NpcActionExecutor(this);
+
+    // Connect to Server World
+    this.server = window.io
+      ? window.io("http://localhost:3000", { transports: ["websocket"] })
+      : io("http://localhost:3000", { transports: ["websocket"] });
+
+    // this.server.set("origins", "*");
+    console.log("server", this.server);
+    // Create player
+    this.server.on("playerCreated", (player: any) => {
+      this.player = new Player(this, player.x, player.y, this.navMesh);
+      this.player.id = player.id;
+      this.player.name = player.name;
+      this.player.avatar = player.avatar;
+      this.entityActions.registerEntity(this.player);
+
+      // Camera follow player
+      this.cameras.main.setBounds(
+        0,
+        0,
+        this.map.widthInPixels,
+        this.map.heightInPixels
+      );
+      this.cameras.main.startFollow(this.player);
+      this.cameras.main.roundPixels = true;
+
+      this._createEvents();
+
+      this.scene.launch("UIScene", { player: this.player, mapLayer: this.map });
+      this.scene.launch("ReactScene", { player: this.player });
+    });
+  }
+
+  public syncNpcs(npcSnapshots: { [key: string]: NpcSnapshot }) {
+    const nextNpcIds = new Set<string>();
+
+    Object.values(npcSnapshots || {}).forEach((rawSnapshot: NpcSnapshot) => {
+      if (!rawSnapshot || typeof rawSnapshot !== "object") return;
+
+      const npcId =
+        typeof rawSnapshot.id === "string" ? rawSnapshot.id.trim() : "";
+      if (!npcId) return;
+
+      const snapshot = createNpcSnapshot({
+        ...rawSnapshot,
+        id: npcId,
+      });
+      this.upsertNpc(snapshot);
+      nextNpcIds.add(snapshot.id);
+    });
+
+    Object.keys(this.npcs).forEach((npcId) => {
+      if (!nextNpcIds.has(npcId)) this.removeNpc(npcId);
+    });
+  }
+
+  public upsertNpc(snapshot: NpcSnapshot): Npc | null {
+    const npcId = typeof snapshot.id === "string" ? snapshot.id.trim() : "";
+    if (!npcId) return null;
+
+    const normalizedSnapshot = createNpcSnapshot({
+      ...snapshot,
+      id: npcId,
+    });
+    const existingNpc = this.npcs[normalizedSnapshot.id];
+
+    if (existingNpc) {
+      existingNpc.applySnapshot(normalizedSnapshot);
+      return existingNpc;
+    }
+
+    const npc = new Npc(this, this.navMesh, normalizedSnapshot);
+    this.npcs[npc.id] = npc;
+    this.entityActions.registerEntity(npc);
+
+    return npc;
+  }
+
+  public removeNpc(npcId: string): void {
+    const normalizedNpcId = typeof npcId === "string" ? npcId.trim() : "";
+    if (!normalizedNpcId) return;
+
+    const npc = this.npcs[normalizedNpcId];
+    if (!npc) return;
+
+    npc.destroy(true);
+    delete this.npcs[normalizedNpcId];
+    this.entityActions.unregisterEntity(normalizedNpcId);
+  }
+
+  public executeNpcActions(
+    npcId: string,
+    actions: unknown
+  ): NpcActionExecutionResult {
+    return this.npcActionExecutor.executeActions(npcId, actions);
+  }
+
+  private _createMap() {
+    this.map = this.make.tilemap({ key: "map" });
+
+    const tiles = this.map.addTilesetImage("tileset", "tiles");
+    const tiles2 = this.map.addTilesetImage("tileset2", "tiles2", 32, 32, 1, 2);
+    const tilesetGrass = this.map.addTilesetImage(
+      "Grass",
+      "tileset_grass",
+      32,
+      32,
+      1,
+      2
+    );
+
+    this.mapLayers["grass"] = this.map.createLayer(
+      "Grass",
+      [tiles, tiles2, tilesetGrass],
+      0,
+      0
+    );
+    this.mapLayers["decorations"] = this.map.createLayer(
+      "Decorations",
+      [tiles, tiles2],
+      0,
+      0
+    );
+    this.mapLayers["objects"] = this.map.createLayer(
+      "Objects",
+      [tiles, tiles2],
+      0,
+      0
+    );
+    // this.mapLayers['objects'].setCollisionByExclusion([-1]);
+    this.mapLayers["ui"] = this.map.createBlankLayer("UI", [tiles, tiles2]);
+
+    const obstaclesLayer = this.map.getObjectLayer("Obstacles");
+    this.navMesh = this.navMeshPlugin.buildMeshFromTiled(
+      "mesh",
+      obstaclesLayer
+    );
+
+    this.physics.world.bounds.width = this.map.widthInPixels;
+    this.physics.world.bounds.height = this.map.heightInPixels;
+
+    // Tile marker
+    // Create a simple graphic that can be used to show which tile the mouse is over
+    const markerWidth = 4;
+    this.marker = this.add.graphics();
+    this.marker.lineStyle(markerWidth, 0xffffff, 0.3);
+    this.marker.strokeRect(
+      -markerWidth / 2,
+      -markerWidth / 2,
+      this.map.tileWidth + markerWidth,
+      this.map.tileHeight + markerWidth
+    );
+
+    // DEBUG NAVMESH
+    //
+    // this.navMesh.enableDebug();
+    // this.navMesh.debugDrawMesh({
+    //   drawCentroid: true,
+    //   drawBounds: false,
+    //   drawNeighbors: true,
+    //   drawPortals: true
+    // });
+  }
+
+  private _createAnims() {
+    // Player animation (used mainly in the Player class when moving)
+    // Need refactoring
+    this.anims.create({
+      key: "player-left",
+      frames: this.anims.generateFrameNumbers("player", {
+        frames: [4, 3, 4, 5],
+      }),
+      frameRate: 10,
+      repeat: -1,
+    });
+    this.anims.create({
+      key: "player-right",
+      frames: this.anims.generateFrameNumbers("player", {
+        frames: [7, 6, 7, 8],
+      }),
+      frameRate: 10,
+      repeat: -1,
+    });
+    this.anims.create({
+      key: "player-up",
+      frames: this.anims.generateFrameNumbers("player", {
+        frames: [10, 9, 10, 11],
+      }),
+      frameRate: 10,
+      repeat: -1,
+    });
+    this.anims.create({
+      key: "player-down",
+      frames: this.anims.generateFrameNumbers("player", {
+        frames: [1, 0, 1, 2],
+      }),
+      frameRate: 10,
+      repeat: -1,
+    });
+
+    // Other Players animation
+    this.anims.create({
+      key: "other-player-left",
+      frames: this.anims.generateFrameNumbers("other-player", {
+        frames: [4, 3, 4, 5],
+      }),
+      frameRate: 10,
+      repeat: -1,
+    });
+    this.anims.create({
+      key: "other-player-right",
+      frames: this.anims.generateFrameNumbers("other-player", {
+        frames: [7, 6, 7, 8],
+      }),
+      frameRate: 10,
+      repeat: -1,
+    });
+    this.anims.create({
+      key: "other-player-up",
+      frames: this.anims.generateFrameNumbers("other-player", {
+        frames: [10, 9, 10, 11],
+      }),
+      frameRate: 10,
+      repeat: -1,
+    });
+    this.anims.create({
+      key: "other-player-down",
+      frames: this.anims.generateFrameNumbers("other-player", {
+        frames: [1, 0, 1, 2],
+      }),
+      frameRate: 10,
+      repeat: -1,
+    });
+  }
+
+  private _createEvents() {
+    // Server Connector Listener
+    const serverConnectorService = new ServerConnectorService(
+      this.server,
+      this,
+      this.emitter
+    );
+    serverConnectorService.listen();
+    // Entity Action Listener
+    const entityActionProcessor = new EntityActionProcessor();
+    entityActionProcessor.listen();
+
+    // Skills Manager
+    const skillsManager = new SkillsManager();
+    skillsManager.listen();
+
+    // On map click
+    this.input.on("pointerdown", this.onMapClick);
+
+    this.emitter.on(
+      ActionType.ENTITY_SELECT,
+      (unit: Entity | null, flag: boolean = true) => {
+        if (this.currentSelection) {
+          this.currentSelection.select(false);
+        }
+
+        if (flag) this.currentSelection = unit;
+        else this.currentSelection = null;
+
+        if (unit) unit.select(flag);
+      }
+    );
+  }
+
+  onMapClick = (pointer: Phaser.Input.Pointer) => {
+    // If something is selected, unselected
+    if (this.currentSelection) {
+      this.emitter.emit(ActionType.ENTITY_SELECT, null);
+      return;
+    }
+
+    this._moveEntity(this.player, pointer.worldX, pointer.worldY);
+  };
+
+  private _moveEntity(
+    entity: Entity,
+    x: number,
+    y: number
+  ): Phaser.Tilemaps.Tile {
+    const tile = this.map.getTileAtWorldXY(
+      x,
+      y,
+      false,
+      this.cameras.main,
+      this.mapLayers["grass"]
+    );
+
+    // Move Player to this position
+    // Player will automatically find its path to the point and update its position accordingly
+    this.entityActions.processNow(entity, {
+      type: ActionType.ENTITY_GO_TO,
+      args: [tile],
+    });
+
+    return tile;
+  }
+
+  update() {
+    if (!this.currentSelection) this.updateMapMarker();
+  }
+
+  private updateMapMarker() {
+    // Convert the mouse position to world position within the camera
+    const worldPoint: any = this.input.activePointer.positionToCamera(
+      this.cameras.main
+    );
+
+    // Move map marker over pointed tile
+    const pointerTileXY = this.mapLayers["ui"].worldToTileXY(
+      worldPoint.x,
+      worldPoint.y
+    );
+    const snappedWorldPoint = this.mapLayers["ui"].tileToWorldXY(
+      pointerTileXY.x,
+      pointerTileXY.y
+    );
+    this.marker.setPosition(snappedWorldPoint.x, snappedWorldPoint.y);
+  }
+}
