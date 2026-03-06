@@ -8,20 +8,25 @@
 
 - 文件：`src/server/NpcBrainService.js`
 - 默认行为：
-  - 当未配置 LLM 凭证时，走 `mock` 决策（本地可用）
-  - 当配置了 `NPC_BRAIN_PROVIDER` + `NPC_BRAIN_API_KEY` 时，调用远端 chat completions 接口
+  - 默认使用 Ollama（`provider=ollama`，`endpoint=http://localhost:11434/v1/chat/completions`）
+  - 当配置了 `NPC_BRAIN_PROVIDER` + `NPC_BRAIN_API_KEY` 时，调用对应 chat completions 接口
 - 输出格式：`{ "actions": [ ... ] }`
 - 动作会经过 `validateNpcActionList` 二次校验；无效输出自动降级为 `WAIT`
+- 每次调用会输出原始请求/响应日志：
+  - `[NpcBrain][LLMRequestRaw][traceId] ...`
+  - `[NpcBrain][LLMResponseRaw][traceId] ...`
 
 ## 环境变量
 
-- `NPC_BRAIN_PROVIDER`：`mock`（默认）或其他自定义 provider 名称
+- `NPC_BRAIN_PROVIDER`：provider 名称（默认 `ollama`）
 - `NPC_BRAIN_API_KEY`：远端模型 API Key
-- `NPC_BRAIN_MODEL`：模型名（默认 `gpt-4o-mini`）
-- `NPC_BRAIN_ENDPOINT`：Chat Completions 地址（默认 `https://api.openai.com/v1/chat/completions`）
+- `NPC_BRAIN_MODEL`：模型名（默认 `qwen3-coder:latest`）
+- `NPC_BRAIN_ENDPOINT`：Chat Completions 地址（默认 `http://localhost:11434/v1/chat/completions`）
 - `NPC_BRAIN_TIMEOUT_MS`：请求超时（毫秒）
 - `NPC_BRAIN_MAX_OUTPUT_TOKENS`：模型输出 token 上限
 - `NPC_BRAIN_MAX_ACTIONS`：单次动作计划上限
+- `NPC_BRAIN_AUTONOMOUS_INTERVAL_MS`：NPC 自动思考间隔（毫秒，默认 6000）
+- `NPC_BRAIN_AUTONOMOUS_TICK_MS`：自动思考调度 tick（毫秒，默认 1000）
 
 ## 触发方式
 
@@ -36,6 +41,11 @@
    - 参数：`{ npcId: string, context?: string }`
    - 权限：仅 NPC 拥有者可触发
    - 客户端聊天指令：`/npc-brain <NPC_ID> [上下文]`
+
+3. 自动触发（新增）
+   - 玩家创建 NPC 后，服务端会自动触发一次 `spawn` 决策
+   - 之后会按 `NPC_BRAIN_AUTONOMOUS_INTERVAL_MS` 周期触发 `autonomous` 决策
+   - 仅对“有在线 owner 的玩家 NPC”生效（系统 NPC 不参与自动执行）
 
 ## 验收映射
 

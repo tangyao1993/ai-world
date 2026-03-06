@@ -2,7 +2,9 @@ const http = require("http");
 const https = require("https");
 const { validateNpcActionList } = require("./security");
 
-const OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions";
+const DEFAULT_CHAT_COMPLETIONS_URL = "http://localhost:11434/v1/chat/completions";
+const DEFAULT_LLM_MODEL = "qwen3-coder:latest";
+const DEFAULT_LLM_API_KEY = "";
 const DEFAULT_WAIT_MS = 1500;
 const DEFAULT_MAX_ACTIONS = 4;
 const DEFAULT_TIMEOUT_MS = 12000;
@@ -55,11 +57,82 @@ function parseJsonSafe(raw) {
   }
 }
 
+function normalizeJsonForLog(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizeJsonForLog(item));
+  }
+
+  if (!isRecord(value)) return value;
+
+  const normalized = {};
+  Object.entries(value).forEach(([key, currentValue]) => {
+    if (typeof currentValue === "string") {
+      const parsed = parseJsonSafe(currentValue);
+      normalized[key] =
+        parsed === null ? currentValue : normalizeJsonForLog(parsed);
+      return;
+    }
+
+    if (Array.isArray(currentValue) || isRecord(currentValue)) {
+      normalized[key] = normalizeJsonForLog(currentValue);
+      return;
+    }
+
+    normalized[key] = currentValue;
+  });
+
+  return normalized;
+}
+
+function formatJsonForLog(raw) {
+  if (typeof raw !== "string") return String(raw);
+
+  const parsed = parseJsonSafe(raw);
+  if (parsed === null) return raw;
+
+  return JSON.stringify(normalizeJsonForLog(parsed), null, 2);
+}
+
 function toWaitAction(durationMs) {
   return {
     type: "WAIT",
     durationMs,
   };
+}
+
+function buildSystemPrompt(promptPayload, maxActions) {
+  const trigger = isRecord(promptPayload?.trigger) ? promptPayload.trigger : {};
+  const world = isRecord(promptPayload?.world) ? promptPayload.world : {};
+  const npc = isRecord(promptPayload?.npc) ? promptPayload.npc : {};
+  const spawn = isRecord(npc.spawn) ? npc.spawn : { x: 0, y: 0 };
+  const triggerType =
+    typeof trigger.type === "string" ? trigger.type.trim() : "manual";
+  const mapWidth = Number.isInteger(world.mapWidth) ? world.mapWidth : 0;
+  const mapHeight = Number.isInteger(world.mapHeight) ? world.mapHeight : 0;
+  const maxActionCount = Number.isInteger(maxActions) ? maxActions : 4;
+
+  const lines = [
+    "你是一个人，只能输出 JSON。",
+    "绝对不要输出 markdown、解释、注释、额外文本。",
+    "",
+    "输出格式必须严格为：",
+    '{"actions":[...]}',
+    "",
+    "动作对象只能使用以下 4 种 schema（字段名必须完全一致）：",
+    '{"type":"MOVE_TO","x":<int>,"y":<int>}',
+    '{"type":"SAY","text":"<string>","channel":"world"}',
+    '{"type":"SAY","text":"<string>","channel":"npc_private","targetPlayerId":"<string>"}',
+    '{"type":"LOOK_AT","direction":"DOWN"}',
+    '{"type":"LOOK_AT","targetEntityId":"<string>"}',
+    '{"type":"WAIT","durationMs":<int>}',
+    "",
+    "严格禁止使用错误字段，例如：action、duration、message、content。",
+    "WAIT 只能使用 durationMs，单位毫秒，范围 100~300。",
+    `actions 数量必须在 1~${maxActionCount}。`,
+    `地图边界：0 <= x < ${mapWidth}，0 <= y < ${mapHeight}。`,
+  ];
+
+  return lines.join("\n");
 }
 
 function resolveContentText(content) {
@@ -75,7 +148,7 @@ function resolveContentText(content) {
     .trim();
 }
 
-function makeHttpRequest(endpoint, headers, body, timeoutMs) {
+function makeHttpRequest(endpoint, headers, body, timeoutMs, traceId) {
   return new Promise((resolve, reject) => {
     let url;
     try {
@@ -104,6 +177,10 @@ function makeHttpRequest(endpoint, headers, body, timeoutMs) {
         });
         res.on("end", () => {
           const statusCode = Number(res.statusCode || 0);
+          const formattedResponse = formatJsonForLog(raw);
+          console.log(
+            `[NpcBrain][LLMResponseRaw][${traceId}] status=${statusCode}\n${formattedResponse}`
+          );
           if (statusCode < 200 || statusCode >= 300) {
             reject(
               new Error(
@@ -129,22 +206,20 @@ function makeHttpRequest(endpoint, headers, body, timeoutMs) {
 
 class NpcBrainService {
   constructor(options = {}) {
-    const provider = trimString(
-      options.provider || process.env.NPC_BRAIN_PROVIDER || "mock",
+    this.provider = trimString(
+      options.provider || process.env.NPC_BRAIN_PROVIDER || "ollama",
       32
     ).toLowerCase();
-
-    this.provider = provider || "mock";
     this.endpoint = trimString(
-      options.endpoint || process.env.NPC_BRAIN_ENDPOINT || OPENAI_CHAT_COMPLETIONS_URL,
+      options.endpoint || process.env.NPC_BRAIN_ENDPOINT || DEFAULT_CHAT_COMPLETIONS_URL,
       300
     );
     this.model = trimString(
-      options.model || process.env.NPC_BRAIN_MODEL || "gpt-4o-mini",
+      options.model || process.env.NPC_BRAIN_MODEL || DEFAULT_LLM_MODEL,
       80
     );
     this.apiKey = trimString(
-      options.apiKey || process.env.NPC_BRAIN_API_KEY || "",
+      options.apiKey || process.env.NPC_BRAIN_API_KEY || DEFAULT_LLM_API_KEY,
       300
     );
     this.temperature =
@@ -237,15 +312,10 @@ class NpcBrainService {
     };
 
     let rawResponse = "";
-    let source = "mock";
+    const source = "remote";
 
     try {
-      if (this.shouldUseRemoteProvider()) {
-        rawResponse = await this.requestRemotePlan(promptPayload);
-        source = "remote";
-      } else {
-        rawResponse = JSON.stringify(this.buildMockPlan(promptPayload));
-      }
+      rawResponse = await this.requestRemotePlan(promptPayload);
     } catch (error) {
       return {
         actions: fallbackActions,
@@ -289,39 +359,9 @@ class NpcBrainService {
     };
   }
 
-  shouldUseRemoteProvider() {
-    if (this.provider === "mock") return false;
-    return !!(this.apiKey && this.endpoint && this.model);
-  }
-
-  buildMockPlan(promptPayload) {
-    const trigger = isRecord(promptPayload.trigger) ? promptPayload.trigger : {};
-    const npc = isRecord(promptPayload.npc) ? promptPayload.npc : {};
-    const soul = trimString(npc.soul, 80);
-
-    if (trigger.type === "chat" && trigger.playerId && trigger.message) {
-      const baseText = soul
-        ? `${trigger.playerName || "冒险者"}，我听见你了。我会按“${soul}”行动。`
-        : `${trigger.playerName || "冒险者"}，我收到你的消息了。`;
-
-      return {
-        actions: [
-          {
-            type: "SAY",
-            text: trimString(baseText, 180),
-            channel: "npc_private",
-            targetPlayerId: trigger.playerId,
-          },
-        ],
-      };
-    }
-
-    return {
-      actions: [toWaitAction(this.defaultWaitMs)],
-    };
-  }
-
   async requestRemotePlan(promptPayload) {
+    const traceId = `npc-brain-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const systemPrompt = buildSystemPrompt(promptPayload, this.maxActions);
     const requestBody = JSON.stringify({
       model: this.model,
       temperature: this.temperature,
@@ -330,8 +370,7 @@ class NpcBrainService {
       messages: [
         {
           role: "system",
-          content:
-            "你是 MMORPG NPC 的决策引擎。仅返回 JSON，不要 markdown，不要解释。JSON 格式必须是 {\"actions\":[...]}，动作仅可使用 MOVE_TO/SAY/LOOK_AT/WAIT。",
+          content: systemPrompt,
         },
         {
           role: "user",
@@ -339,6 +378,11 @@ class NpcBrainService {
         },
       ],
     });
+    const formattedRequest = formatJsonForLog(requestBody);
+
+    console.log(
+      `[NpcBrain][LLMRequestRaw][${traceId}] endpoint=${this.endpoint}\n${formattedRequest}`
+    );
 
     const raw = await makeHttpRequest(
       this.endpoint,
@@ -347,7 +391,8 @@ class NpcBrainService {
         Authorization: `Bearer ${this.apiKey}`,
       },
       requestBody,
-      this.timeoutMs
+      this.timeoutMs,
+      traceId
     );
 
     const parsed = parseJsonSafe(raw);

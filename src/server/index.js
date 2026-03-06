@@ -22,6 +22,19 @@ const RESOURCE_MAX_LEVEL = 4;
 const NPC_EXECUTION_RETENTION_MS = 5 * 60 * 1000;
 const NPC_METRICS_LOG_INTERVAL_MS = 60 * 1000;
 const NPC_BRAIN_FALLBACK_WAIT_MS = 1500;
+const DEFAULT_NPC_AUTONOMOUS_INTERVAL_MS = 6000;
+const DEFAULT_NPC_AUTONOMOUS_TICK_MS = 1000;
+const NPC_AUTONOMOUS_INTERVAL_MS = (() => {
+  const configured = Number(process.env.NPC_BRAIN_AUTONOMOUS_INTERVAL_MS);
+  if (!Number.isInteger(configured)) return DEFAULT_NPC_AUTONOMOUS_INTERVAL_MS;
+  return Math.max(1500, Math.min(60000, configured));
+})();
+const NPC_AUTONOMOUS_TICK_MS = (() => {
+  const configured = Number(process.env.NPC_BRAIN_AUTONOMOUS_TICK_MS);
+  if (!Number.isInteger(configured)) return DEFAULT_NPC_AUTONOMOUS_TICK_MS;
+  return Math.max(500, Math.min(5000, configured));
+})();
+const NPC_AUTONOMOUS_INITIAL_DELAY_MS = 800;
 const MAP_WIDTH = Number.isInteger(worldData.width) ? worldData.width : 0;
 const MAP_HEIGHT = Number.isInteger(worldData.height) ? worldData.height : 0;
 
@@ -479,6 +492,132 @@ const state = {
   ),
 };
 
+const npcAutonomousRuntime = {
+  isRunning: false,
+  inFlightByNpc: {},
+  lastDecisionAtByNpc: {},
+};
+
+function hasPendingExecutionForNpc(npcId) {
+  return Object.values(npcObservability.pendingExecutions).some(
+    (execution) => execution.npcId === npcId
+  );
+}
+
+async function decideNpcActions({
+  npc,
+  triggerType,
+  playerId,
+  playerName,
+  message,
+  context,
+}) {
+  const decision = await npcBrainService.decidePlan({
+    npc,
+    trigger: {
+      type: triggerType,
+      playerId: playerId || "",
+      playerName: playerName || "",
+      message,
+      context,
+    },
+    worldContext: {
+      onlinePlayerCount: Object.keys(state.players).length,
+      npcCount: Object.keys(state.npcs).length,
+      mapWidth: MAP_WIDTH,
+      mapHeight: MAP_HEIGHT,
+    },
+    availableActions: ["MOVE_TO", "SAY", "LOOK_AT", "WAIT"],
+    validationContext: buildNpcActionValidationContext(state),
+  });
+
+  const normalizedPlan = finalizeNpcActionPlan(decision.actions, state);
+
+  return {
+    actions: normalizedPlan.actions,
+    usedFallback: !!decision.usedFallback || normalizedPlan.usedFallback,
+    reason: decision.reason || normalizedPlan.fallbackReason,
+    details: decision.details || normalizedPlan.fallbackDetails,
+    source: decision.source || "unknown",
+  };
+}
+
+async function runNpcAutonomousLoop() {
+  if (npcAutonomousRuntime.isRunning) return;
+
+  npcAutonomousRuntime.isRunning = true;
+
+  try {
+    const now = Date.now();
+    const npcEntries = Object.values(state.npcs);
+
+    for (const npc of npcEntries) {
+      if (!npc || typeof npc.id !== "string") continue;
+
+      const npcId = npc.id.trim();
+      if (!npcId) continue;
+
+      const ownerSocketId = state.npcOwners[npcId];
+      if (
+        typeof ownerSocketId !== "string" ||
+        !ownerSocketId ||
+        ownerSocketId === SYSTEM_NPC_OWNER
+      ) {
+        continue;
+      }
+
+      if (!io.sockets.sockets.get(ownerSocketId)) continue;
+      if (npcAutonomousRuntime.inFlightByNpc[npcId]) continue;
+      if (hasPendingExecutionForNpc(npcId)) continue;
+
+      const lastDecisionAt = npcAutonomousRuntime.lastDecisionAtByNpc[npcId] || 0;
+      if (now - lastDecisionAt < NPC_AUTONOMOUS_INTERVAL_MS) continue;
+
+      npcAutonomousRuntime.inFlightByNpc[npcId] = true;
+      npcAutonomousRuntime.lastDecisionAtByNpc[npcId] = now;
+
+      const ownerPlayer = state.players[ownerSocketId];
+
+      try {
+        const plan = await decideNpcActions({
+          npc,
+          triggerType: "autonomous",
+          playerId: ownerPlayer?.id || ownerSocketId,
+          playerName: ownerPlayer?.name || "",
+          context: "autonomous_tick",
+        });
+
+        dispatchNpcActionPlan(npcId, ownerSocketId, plan.actions);
+
+        const ownerSocket = io.sockets.sockets.get(ownerSocketId);
+        if (ownerSocket) {
+          ownerSocket.emit("npc.brain.decision", {
+            npcId,
+            triggerType: "autonomous",
+            source: plan.source,
+            usedFallback: plan.usedFallback,
+            reason: plan.reason || null,
+            actions: plan.actions,
+          });
+        }
+      } catch (error) {
+        console.warn(
+          "[NpcAutonomous] decision failed",
+          JSON.stringify({
+            npcId,
+            ownerSocketId,
+            message: String(error && error.message ? error.message : error),
+          })
+        );
+      } finally {
+        delete npcAutonomousRuntime.inFlightByNpc[npcId];
+      }
+    }
+  } finally {
+    npcAutonomousRuntime.isRunning = false;
+  }
+}
+
 console.log("Alkito Server - Starting...");
 console.log("Resources populated: ", Object.keys(state.resources).length);
 
@@ -504,41 +643,6 @@ io.on("connection", function (socket) {
   };
 
   state.players[socket.id] = newPlayer;
-
-  const decideNpcActions = async ({
-    npc,
-    triggerType,
-    player,
-    message,
-    context,
-  }) => {
-    const decision = await npcBrainService.decidePlan({
-      npc,
-      trigger: {
-        type: triggerType,
-        playerId: player?.id || socket.id,
-        playerName: player?.name || "",
-        message,
-        context,
-      },
-      worldContext: {
-        onlinePlayerCount: Object.keys(state.players).length,
-        npcCount: Object.keys(state.npcs).length,
-      },
-      availableActions: ["MOVE_TO", "SAY", "LOOK_AT", "WAIT"],
-      validationContext: buildNpcActionValidationContext(state),
-    });
-
-    const normalizedPlan = finalizeNpcActionPlan(decision.actions, state);
-
-    return {
-      actions: normalizedPlan.actions,
-      usedFallback: !!decision.usedFallback || normalizedPlan.usedFallback,
-      reason: decision.reason || normalizedPlan.fallbackReason,
-      details: decision.details || normalizedPlan.fallbackDetails,
-      source: decision.source || "unknown",
-    };
-  };
 
   console.log("User connected: ", newPlayer.name, newPlayer.id);
 
@@ -634,7 +738,45 @@ io.on("connection", function (socket) {
 
     state.npcs[sanitizedNpc.id] = sanitizedNpc;
     state.npcOwners[sanitizedNpc.id] = socket.id;
+    npcAutonomousRuntime.lastDecisionAtByNpc[sanitizedNpc.id] = 0;
     io.emit("npc.created", sanitizedNpc);
+
+    const ownerPlayer = state.players[socket.id];
+    setTimeout(async () => {
+      if (!state.npcs[sanitizedNpc.id]) return;
+      if (state.npcOwners[sanitizedNpc.id] !== socket.id) return;
+
+      try {
+        const plan = await decideNpcActions({
+          npc: sanitizedNpc,
+          triggerType: "spawn",
+          playerId: ownerPlayer?.id || socket.id,
+          playerName: ownerPlayer?.name || "",
+          context: "after_create",
+        });
+
+        dispatchNpcActionPlan(sanitizedNpc.id, socket.id, plan.actions);
+        npcAutonomousRuntime.lastDecisionAtByNpc[sanitizedNpc.id] = Date.now();
+
+        socket.emit("npc.brain.decision", {
+          npcId: sanitizedNpc.id,
+          triggerType: "spawn",
+          source: plan.source,
+          usedFallback: plan.usedFallback,
+          reason: plan.reason || null,
+          actions: plan.actions,
+        });
+      } catch (error) {
+        console.warn(
+          "[NpcCreate] initial decision failed",
+          JSON.stringify({
+            npcId: sanitizedNpc.id,
+            ownerSocketId: socket.id,
+            message: String(error && error.message ? error.message : error),
+          })
+        );
+      }
+    }, NPC_AUTONOMOUS_INITIAL_DELAY_MS);
   });
 
   socket.on("npc.update", (npcSnapshot) => {
@@ -699,6 +841,8 @@ io.on("connection", function (socket) {
 
     delete state.npcs[targetNpcId];
     delete state.npcOwners[targetNpcId];
+    delete npcAutonomousRuntime.inFlightByNpc[targetNpcId];
+    delete npcAutonomousRuntime.lastDecisionAtByNpc[targetNpcId];
     io.emit("npc.removed", targetNpcId);
   });
 
@@ -766,7 +910,8 @@ io.on("connection", function (socket) {
       const plan = await decideNpcActions({
         npc,
         triggerType: "manual",
-        player,
+        playerId: player?.id || socket.id,
+        playerName: player?.name || "",
         context,
       });
 
@@ -860,7 +1005,8 @@ io.on("connection", function (socket) {
       const plan = await decideNpcActions({
         npc,
         triggerType: "chat",
-        player,
+        playerId: player.id,
+        playerName: player.name,
         message,
         context: normalizeBrainContext(payload?.context),
       });
@@ -916,6 +1062,8 @@ io.on("connection", function (socket) {
 
       if (state.npcs[npcId]) {
         delete state.npcs[npcId];
+        delete npcAutonomousRuntime.inFlightByNpc[npcId];
+        delete npcAutonomousRuntime.lastDecisionAtByNpc[npcId];
         io.emit("npc.removed", npcId);
       }
     });
@@ -1026,6 +1174,10 @@ setInterval(() => {
     }
   });
 }, 1000);
+
+setInterval(() => {
+  void runNpcAutonomousLoop();
+}, NPC_AUTONOMOUS_TICK_MS);
 
 setInterval(() => {
   cleanupExpiredNpcExecutions();

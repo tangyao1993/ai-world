@@ -9,7 +9,7 @@
 - 资源成长与采集（如木材/作物）
 - 背包、技能、面板等基础 UI 系统
 - NPC 创建、更新、移除与全量/增量同步
-- NPC Brain 决策链路（`mock` / 远端模型）
+- NPC Brain 决策链路（远端模型）
 - 动作协议白名单与服务端限流、越权防护、执行观测日志
 
 ## 技术栈
@@ -56,17 +56,19 @@ npm run dev
 
 ## AI NPC 配置
 
-默认情况下，`NpcBrainService` 使用 `mock` 模式，不需要 API Key。  
-如需接入远端模型，可在启动后端前设置环境变量：
+默认情况下，`NpcBrainService` 已预设为 Ollama 本地接口。  
+如需显式配置，可在启动后端前设置环境变量：
 
 ```bash
-export NPC_BRAIN_PROVIDER=openai
-export NPC_BRAIN_API_KEY=你的密钥
-export NPC_BRAIN_MODEL=gpt-4o-mini
-export NPC_BRAIN_ENDPOINT=https://api.openai.com/v1/chat/completions
+export NPC_BRAIN_PROVIDER=ollama
+export NPC_BRAIN_API_KEY=
+export NPC_BRAIN_MODEL=qwen3-coder:latest
+export NPC_BRAIN_ENDPOINT=http://localhost:11434/v1/chat/completions
 export NPC_BRAIN_TIMEOUT_MS=12000
 export NPC_BRAIN_MAX_OUTPUT_TOKENS=280
 export NPC_BRAIN_MAX_ACTIONS=4
+export NPC_BRAIN_AUTONOMOUS_INTERVAL_MS=6000
+export NPC_BRAIN_AUTONOMOUS_TICK_MS=1000
 ```
 
 可选参数（按需）：
@@ -74,6 +76,8 @@ export NPC_BRAIN_MAX_ACTIONS=4
 - `NPC_BRAIN_TEMPERATURE`
 - `NPC_BRAIN_DEFAULT_WAIT_MS`
 - `NPC_BRAIN_MAX_CONTEXT_LENGTH`
+- `NPC_BRAIN_AUTONOMOUS_INTERVAL_MS`（NPC 自动思考间隔，毫秒）
+- `NPC_BRAIN_AUTONOMOUS_TICK_MS`（自动思考调度 tick，毫秒）
 
 ## 游戏内交互
 
@@ -81,6 +85,7 @@ export NPC_BRAIN_MAX_ACTIONS=4
 - NPC 私聊：`/npc <NPC_ID> <消息内容>`
 - 手动触发 NPC 决策：`/npc-brain <NPC_ID> [上下文]`
 - 创建 NPC：UI 菜单中的 `BOOK` 按钮进入创建弹窗
+- 自主行为：玩家创建的 NPC 会在创建后自动触发一次决策，并按间隔持续自动决策
 
 ## 目录结构
 
@@ -109,6 +114,7 @@ export NPC_BRAIN_MAX_ACTIONS=4
 - 前端能打开但玩家不出现：确认 `npm run server` 已启动且监听 `3000`。
 - NPC 指令无响应：先确认 NPC ID 是否存在，再检查命令格式是否正确。
 - 远端模型未生效：检查 `NPC_BRAIN_PROVIDER` 与 `NPC_BRAIN_API_KEY` 是否已在当前终端导出。
+- NPC 仍不动：检查后端日志是否出现 `BRAIN_REQUEST_FAILED`，并查看 `[NpcBrain][LLMRequestRaw]` / `[NpcBrain][LLMResponseRaw]` 原始日志排查模型返回。
 
 ## License
 
