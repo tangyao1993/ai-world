@@ -301,6 +301,78 @@ export default class NpcActionExecutor {
           ],
         };
       }
+      case "TALK_TO_NPC": {
+        const targetNpc = this.scene.npcs[action.targetNpcId];
+        if (!targetNpc) {
+          return {
+            ok: false,
+            error: {
+              code: "TALK_TARGET_NPC_NOT_FOUND",
+              message: `TALK_TO_NPC target "${action.targetNpcId}" does not exist.`,
+              actionIndex: index,
+              actionType: action.type,
+            },
+          };
+        }
+
+        return {
+          ok: true,
+          value: [
+            {
+              type: ActionType.NPC_TALK_TO_NPC,
+              args: [action],
+            },
+          ],
+        };
+      }
+      case "GIFT_TO_NPC": {
+        const targetNpc = this.scene.npcs[action.targetNpcId];
+        if (!targetNpc) {
+          return {
+            ok: false,
+            error: {
+              code: "GIFT_TARGET_NPC_NOT_FOUND",
+              message: `GIFT_TO_NPC target "${action.targetNpcId}" does not exist.`,
+              actionIndex: index,
+              actionType: action.type,
+            },
+          };
+        }
+
+        return {
+          ok: true,
+          value: [
+            {
+              type: ActionType.NPC_GIFT_TO_NPC,
+              args: [action],
+            },
+          ],
+        };
+      }
+      case "ATTACK_NPC": {
+        const targetNpc = this.scene.npcs[action.targetNpcId];
+        if (!targetNpc) {
+          return {
+            ok: false,
+            error: {
+              code: "ATTACK_TARGET_NPC_NOT_FOUND",
+              message: `ATTACK_NPC target "${action.targetNpcId}" does not exist.`,
+              actionIndex: index,
+              actionType: action.type,
+            },
+          };
+        }
+
+        return {
+          ok: true,
+          value: [
+            {
+              type: ActionType.NPC_ATTACK_NPC,
+              args: [action],
+            },
+          ],
+        };
+      }
       default:
         return {
           ok: false,

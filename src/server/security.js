@@ -8,6 +8,9 @@ const NPC_ACTION_TYPES = new Set([
   "WAIT",
   "INTERACT",
   "COLLECT",
+  "TALK_TO_NPC",
+  "GIFT_TO_NPC",
+  "ATTACK_NPC",
 ]);
 const LOOK_DIRECTIONS = new Set(["UP", "DOWN", "LEFT", "RIGHT"]);
 const CHAT_CHANNELS = new Set(["world", "npc_private"]);
@@ -22,6 +25,7 @@ const MAX_ACTION_BATCH_SIZE = 20;
 
 const MIN_WAIT_MS = 100;
 const MAX_WAIT_MS = 30000;
+const MAX_GIFT_QUANTITY = 99;
 
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -170,6 +174,8 @@ function validateNpcActionList(actions, context = {}) {
   const players = isRecord(context.players) ? context.players : {};
   const npcs = isRecord(context.npcs) ? context.npcs : {};
   const resources = isRecord(context.resources) ? context.resources : {};
+  const items = isRecord(context.items) ? context.items : {};
+  const actorNpcId = normalizeId(context.actorNpcId);
   const resourceMaxLevel = Number.isInteger(context.resourceMaxLevel)
     ? context.resourceMaxLevel
     : 4;
@@ -403,6 +409,153 @@ function validateNpcActionList(actions, context = {}) {
       normalizedActions.push({
         type: "COLLECT",
         resourceId,
+      });
+      continue;
+    }
+
+    if (action.type === "TALK_TO_NPC") {
+      const targetNpcId = normalizeReferenceId(action.targetNpcId);
+      const text = normalizeString(action.text, maxSayLength);
+      if (!targetNpcId || !npcs[targetNpcId]) {
+        return {
+          ok: false,
+          reason: "INVALID_TALK_TARGET_NPC",
+          details: {
+            actionIndex: i,
+            field: `actions[${i}].targetNpcId`,
+            message: "TALK_TO_NPC targetNpcId must be an existing NPC id.",
+          },
+        };
+      }
+      if (actorNpcId && targetNpcId === actorNpcId) {
+        return {
+          ok: false,
+          reason: "INVALID_TALK_TARGET_SELF",
+          details: {
+            actionIndex: i,
+            field: `actions[${i}].targetNpcId`,
+            message: "TALK_TO_NPC targetNpcId cannot be self.",
+          },
+        };
+      }
+      if (!text) {
+        return {
+          ok: false,
+          reason: "INVALID_TALK_TEXT",
+          details: {
+            actionIndex: i,
+            field: `actions[${i}].text`,
+            message: `TALK_TO_NPC text must be a non-empty string with max length ${maxSayLength}.`,
+          },
+        };
+      }
+
+      normalizedActions.push({
+        type: "TALK_TO_NPC",
+        targetNpcId,
+        text,
+      });
+      continue;
+    }
+
+    if (action.type === "GIFT_TO_NPC") {
+      const targetNpcId = normalizeReferenceId(action.targetNpcId);
+      const itemId = normalizeReferenceId(action.itemId);
+      const quantity = Number.isInteger(action.quantity) ? action.quantity : 0;
+
+      if (!targetNpcId || !npcs[targetNpcId]) {
+        return {
+          ok: false,
+          reason: "INVALID_GIFT_TARGET_NPC",
+          details: {
+            actionIndex: i,
+            field: `actions[${i}].targetNpcId`,
+            message: "GIFT_TO_NPC targetNpcId must be an existing NPC id.",
+          },
+        };
+      }
+      if (actorNpcId && targetNpcId === actorNpcId) {
+        return {
+          ok: false,
+          reason: "INVALID_GIFT_TARGET_SELF",
+          details: {
+            actionIndex: i,
+            field: `actions[${i}].targetNpcId`,
+            message: "GIFT_TO_NPC targetNpcId cannot be self.",
+          },
+        };
+      }
+      if (!itemId || !items[itemId]) {
+        return {
+          ok: false,
+          reason: "INVALID_GIFT_ITEM_ID",
+          details: {
+            actionIndex: i,
+            field: `actions[${i}].itemId`,
+            message: "GIFT_TO_NPC itemId must be an existing item id.",
+          },
+        };
+      }
+      if (quantity < 1 || quantity > MAX_GIFT_QUANTITY) {
+        return {
+          ok: false,
+          reason: "INVALID_GIFT_QUANTITY",
+          details: {
+            actionIndex: i,
+            field: `actions[${i}].quantity`,
+            message: `GIFT_TO_NPC quantity must be an integer in [1, ${MAX_GIFT_QUANTITY}].`,
+          },
+        };
+      }
+
+      normalizedActions.push({
+        type: "GIFT_TO_NPC",
+        targetNpcId,
+        itemId,
+        quantity,
+      });
+      continue;
+    }
+
+    if (action.type === "ATTACK_NPC") {
+      const targetNpcId = normalizeReferenceId(action.targetNpcId);
+      if (!targetNpcId || !npcs[targetNpcId]) {
+        return {
+          ok: false,
+          reason: "INVALID_ATTACK_TARGET_NPC",
+          details: {
+            actionIndex: i,
+            field: `actions[${i}].targetNpcId`,
+            message: "ATTACK_NPC targetNpcId must be an existing NPC id.",
+          },
+        };
+      }
+      if (actorNpcId && targetNpcId === actorNpcId) {
+        return {
+          ok: false,
+          reason: "INVALID_ATTACK_TARGET_SELF",
+          details: {
+            actionIndex: i,
+            field: `actions[${i}].targetNpcId`,
+            message: "ATTACK_NPC targetNpcId cannot be self.",
+          },
+        };
+      }
+      if (isRecord(npcs[targetNpcId]) && npcs[targetNpcId].alive === false) {
+        return {
+          ok: false,
+          reason: "INVALID_ATTACK_TARGET_DEAD",
+          details: {
+            actionIndex: i,
+            field: `actions[${i}].targetNpcId`,
+            message: "ATTACK_NPC targetNpcId must be alive.",
+          },
+        };
+      }
+
+      normalizedActions.push({
+        type: "ATTACK_NPC",
+        targetNpcId,
       });
       continue;
     }

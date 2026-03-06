@@ -20,3 +20,7 @@ export type NpcBrainDecisionRequest = {
   npcId: string;
   context?: string;
 };
+
+export type WorldEventInjectRequest = {
+  description: string;
+};

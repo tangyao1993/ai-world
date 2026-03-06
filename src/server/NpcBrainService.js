@@ -107,7 +107,17 @@ function buildSystemPrompt(promptPayload, maxActions) {
   const maxActionCount = Number.isInteger(maxActions) ? maxActions : 4;
   const availableActions = Array.isArray(promptPayload?.availableActions)
     ? promptPayload.availableActions.filter((item) => typeof item === "string")
-    : ["MOVE_TO", "SAY", "LOOK_AT", "WAIT", "INTERACT", "COLLECT"];
+    : [
+        "MOVE_TO",
+        "SAY",
+        "LOOK_AT",
+        "WAIT",
+        "INTERACT",
+        "COLLECT",
+        "TALK_TO_NPC",
+        "GIFT_TO_NPC",
+        "ATTACK_NPC",
+      ];
 
   const lines = [
     "你是一个人，只能输出 JSON。",
@@ -125,10 +135,16 @@ function buildSystemPrompt(promptPayload, maxActions) {
     '{"type":"WAIT","durationMs":<int>}',
     '{"type":"INTERACT","targetEntityId":"<string>"}',
     '{"type":"COLLECT","resourceId":"<string>"}',
+    '{"type":"TALK_TO_NPC","targetNpcId":"<string>","text":"<string>"}',
+    '{"type":"GIFT_TO_NPC","targetNpcId":"<string>","itemId":"<string>","quantity":<int>}',
+    '{"type":"ATTACK_NPC","targetNpcId":"<string>"}',
     "",
     "严格禁止使用错误字段，例如：action、duration、message、content。",
     "WAIT 只能使用 durationMs，单位毫秒，范围 100~30000。",
     "world.perception.resources 仅包含当前可采集资源，COLLECT 只能使用其中的 resourceId。",
+    "TALK_TO_NPC/GIFT_TO_NPC/ATTACK_NPC 的 targetNpcId 只能来自 world.perception.npcs。",
+    "GIFT_TO_NPC 的 itemId 只能使用 npc.inventory 中数量大于 0 的物品。",
+    "ATTACK_NPC 前先判断 target 是否存活（alive=true），并避免连续攻击同一目标。",
     `actions 数量必须在 1~${maxActionCount}。`,
     `地图边界：0 <= x < ${mapWidth}，0 <= y < ${mapHeight}。`,
     `可用动作白名单：${availableActions.join(", ")}。`,
@@ -281,7 +297,17 @@ class NpcBrainService {
     const trigger = isRecord(input.trigger) ? input.trigger : {};
     const availableActions = Array.isArray(input.availableActions)
       ? input.availableActions
-      : ["MOVE_TO", "SAY", "LOOK_AT", "WAIT", "INTERACT", "COLLECT"];
+      : [
+          "MOVE_TO",
+          "SAY",
+          "LOOK_AT",
+          "WAIT",
+          "INTERACT",
+          "COLLECT",
+          "TALK_TO_NPC",
+          "GIFT_TO_NPC",
+          "ATTACK_NPC",
+        ];
     const promptPayload = {
       npc: {
         id: npcId,

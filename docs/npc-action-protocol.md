@@ -1,7 +1,7 @@
 # NPC 动作协议（白名单）
 
 本协议用于约束 LLM 仅输出可执行、安全的 NPC 动作。  
-白名单动作仅包含：`MOVE_TO`、`SAY`、`LOOK_AT`、`WAIT`。
+白名单动作包含：`MOVE_TO`、`SAY`、`LOOK_AT`、`WAIT`、`INTERACT`、`COLLECT`、`TALK_TO_NPC`、`GIFT_TO_NPC`、`ATTACK_NPC`。
 
 ## 1. 顶层结构
 
@@ -82,6 +82,45 @@
 
 - `durationMs`: 整数，范围 `[100, 30000]`
 
+### 2.5 TALK_TO_NPC
+
+```json
+{
+  "type": "TALK_TO_NPC",
+  "targetNpcId": "npc-guard-1",
+  "text": "我们暂时休战。"
+}
+```
+
+- `targetNpcId`: 字符串长度 `[1, 64]`
+- `text`: 非空字符串，长度 `[1, 200]`
+
+### 2.6 GIFT_TO_NPC
+
+```json
+{
+  "type": "GIFT_TO_NPC",
+  "targetNpcId": "npc-merchant-1",
+  "itemId": "log_beech",
+  "quantity": 2
+}
+```
+
+- `targetNpcId`: 字符串长度 `[1, 64]`
+- `itemId`: 字符串长度 `[1, 64]`
+- `quantity`: 整数，范围 `[1, 99]`
+
+### 2.7 ATTACK_NPC
+
+```json
+{
+  "type": "ATTACK_NPC",
+  "targetNpcId": "npc-bandit-1"
+}
+```
+
+- `targetNpcId`: 字符串长度 `[1, 64]`
+
 ## 3. 拒绝策略（非白名单）
 
 - 如果 `type` 不在白名单，返回错误码 `ACTION_NOT_ALLOWED`
@@ -94,4 +133,3 @@
 - 入口函数：
   - `validateNpcAction(action)`
   - `validateNpcActionList(actions)`
-

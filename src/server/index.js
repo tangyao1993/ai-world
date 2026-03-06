@@ -6,6 +6,7 @@ const io = require("socket.io")(server);
 const CONFIG = require("../gameConfig.json");
 const worldData = require("../../public/assets/map/world.json");
 const resourcesData = require("../data/resources.json");
+const itemsData = require("../data/items.json");
 const NpcBrainService = require("./NpcBrainService");
 const {
   SYSTEM_NPC_OWNER,
@@ -39,6 +40,16 @@ const MAP_WIDTH = Number.isInteger(worldData.width) ? worldData.width : 0;
 const MAP_HEIGHT = Number.isInteger(worldData.height) ? worldData.height : 0;
 const NPC_PERCEPTION_WINDOW_WIDTH_TILES = 24;
 const NPC_PERCEPTION_WINDOW_HEIGHT_TILES = 14;
+const OBSERVER_MODE_ENABLED =
+  String(process.env.WORLD_GOD_VIEW_MODE || "true").toLowerCase() !== "false";
+const NPC_MAX_HP = 100;
+const NPC_ATTACK_DAMAGE = 1;
+const NPC_ATTACK_COOLDOWN_MS = 1200;
+const NPC_REVIVE_DELAY_MS = 5000;
+const NPC_MAX_INVENTORY_ITEM_QUANTITY = 999;
+const NPC_AFFINITY_MAX = 100;
+const MAX_WORLD_EVENT_LENGTH = 240;
+const MAX_WORLD_EVENTS = 20;
 
 const rateLimiter = createRateLimiter();
 const npcBrainService = new NpcBrainService();
@@ -119,24 +130,43 @@ function buildNpcReplyMessage(npc, playerName, playerMessage) {
   return `${playerName}，你说“${playerMessage}”，${soulHint}`;
 }
 
-function buildNpcActionValidationContext(stateRef) {
+function buildNpcActionValidationContext(stateRef, actorNpcId = "") {
   return {
     mapWidth: MAP_WIDTH,
     mapHeight: MAP_HEIGHT,
     players: stateRef.players,
     npcs: stateRef.npcs,
     resources: stateRef.resources,
+    items: itemsData,
+    actorNpcId,
     resourceMaxLevel: RESOURCE_MAX_LEVEL,
     maxSayLength: MAX_CHAT_MESSAGE_LENGTH,
   };
 }
 
 function buildNpcWorldContext(stateRef, npc) {
+  const runtimeNpc = ensureNpcRuntimeState(npc) || {
+    hp: NPC_MAX_HP,
+    alive: true,
+    affinityByNpcId: {},
+    inventory: {},
+  };
+
   return {
     onlinePlayerCount: Object.keys(stateRef.players || {}).length,
     npcCount: Object.keys(stateRef.npcs || {}).length,
+    observerModeEnabled: OBSERVER_MODE_ENABLED,
     mapWidth: MAP_WIDTH,
     mapHeight: MAP_HEIGHT,
+    recentWorldEvents: Array.isArray(stateRef.worldEvents)
+      ? stateRef.worldEvents.slice(-5)
+      : [],
+    selfStatus: {
+      hp: runtimeNpc.hp,
+      alive: runtimeNpc.alive,
+      inventory: getNpcInventorySummary(runtimeNpc),
+      affinityByNpcId: { ...runtimeNpc.affinityByNpcId },
+    },
     perception: buildNpcPerceptionContext(stateRef, npc),
   };
 }
@@ -155,6 +185,11 @@ function normalizeBrainContext(value) {
   return value.trim().slice(0, 240);
 }
 
+function normalizeWorldEventDescription(value) {
+  if (typeof value !== "string") return "";
+  return value.trim().slice(0, MAX_WORLD_EVENT_LENGTH);
+}
+
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -166,6 +201,126 @@ function normalizeRuntimeId(value) {
 
   if (typeof value !== "string") return "";
   return value.trim().slice(0, 64);
+}
+
+function clampInteger(value, min, max, fallback) {
+  if (!Number.isInteger(value)) return fallback;
+  return Math.max(min, Math.min(max, value));
+}
+
+function clampQuantity(value, max = NPC_MAX_INVENTORY_ITEM_QUANTITY) {
+  if (!Number.isInteger(value)) return 0;
+  return Math.max(0, Math.min(max, value));
+}
+
+function ensureNpcRuntimeState(npc) {
+  if (!isRecord(npc)) return null;
+
+  npc.hp = clampInteger(npc.hp, 0, NPC_MAX_HP, NPC_MAX_HP);
+  npc.alive = npc.alive !== false;
+  if (!npc.alive && npc.hp > 0) npc.hp = 0;
+  if (!isRecord(npc.inventory)) npc.inventory = {};
+  if (!isRecord(npc.affinityByNpcId)) npc.affinityByNpcId = {};
+  npc.combatCooldownUntil = Number.isInteger(npc.combatCooldownUntil)
+    ? npc.combatCooldownUntil
+    : 0;
+  npc.deadUntil = Number.isInteger(npc.deadUntil) ? npc.deadUntil : 0;
+
+  return npc;
+}
+
+function getNpcInventorySummary(npc) {
+  if (!isRecord(npc?.inventory)) return {};
+
+  const summary = {};
+  Object.entries(npc.inventory).forEach(([itemId, quantity]) => {
+    const normalizedItemId = normalizeRuntimeId(itemId);
+    if (!normalizedItemId) return;
+
+    const normalizedQuantity = clampQuantity(quantity);
+    if (normalizedQuantity <= 0) return;
+    summary[normalizedItemId] = normalizedQuantity;
+  });
+  return summary;
+}
+
+function addNpcInventoryItem(npc, itemId, quantity) {
+  const npcRef = ensureNpcRuntimeState(npc);
+  const normalizedItemId = normalizeRuntimeId(itemId);
+  const delta = clampQuantity(quantity);
+  if (!npcRef || !normalizedItemId || delta <= 0) return 0;
+
+  const current = clampQuantity(npcRef.inventory[normalizedItemId]);
+  const next = clampQuantity(current + delta);
+  npcRef.inventory[normalizedItemId] = next;
+  return next - current;
+}
+
+function removeNpcInventoryItem(npc, itemId, quantity) {
+  const npcRef = ensureNpcRuntimeState(npc);
+  const normalizedItemId = normalizeRuntimeId(itemId);
+  const delta = clampQuantity(quantity);
+  if (!npcRef || !normalizedItemId || delta <= 0) return 0;
+
+  const current = clampQuantity(npcRef.inventory[normalizedItemId]);
+  if (current < delta) return 0;
+
+  const next = clampQuantity(current - delta);
+  if (next <= 0) delete npcRef.inventory[normalizedItemId];
+  else npcRef.inventory[normalizedItemId] = next;
+
+  return delta;
+}
+
+function increaseNpcAffinity(targetNpc, fromNpcId, delta) {
+  const targetRef = ensureNpcRuntimeState(targetNpc);
+  const normalizedFromNpcId = normalizeRuntimeId(fromNpcId);
+  const normalizedDelta = clampQuantity(delta, NPC_AFFINITY_MAX);
+  if (!targetRef || !normalizedFromNpcId || normalizedDelta <= 0) return 0;
+
+  const current = clampInteger(
+    targetRef.affinityByNpcId[normalizedFromNpcId],
+    0,
+    NPC_AFFINITY_MAX,
+    0
+  );
+  const next = clampInteger(
+    current + normalizedDelta,
+    0,
+    NPC_AFFINITY_MAX,
+    NPC_AFFINITY_MAX
+  );
+  targetRef.affinityByNpcId[normalizedFromNpcId] = next;
+  return next - current;
+}
+
+function getResourceDrop(resource) {
+  if (!isRecord(resource)) return null;
+  const resourceType =
+    typeof resource.type === "string" ? resource.type.trim() : "";
+  if (!resourceType || !isRecord(resourcesData[resourceType])) return null;
+
+  const definition = resourcesData[resourceType];
+  const itemId = normalizeRuntimeId(definition.item);
+  const quantity = clampQuantity(definition.itemQuantity || 1, 99);
+  if (!itemId || quantity <= 0) return null;
+
+  return {
+    itemId,
+    quantity,
+  };
+}
+
+function appendWorldChatMessage(message) {
+  if (!isRecord(message)) return;
+  if (message.channel !== "world") return;
+
+  state.chatMessages.push(message);
+  if (state.chatMessages.length > MAX_CHAT_HISTORY) {
+    state.chatMessages = state.chatMessages.slice(
+      state.chatMessages.length - MAX_CHAT_HISTORY
+    );
+  }
 }
 
 function hasValidTile(tile) {
@@ -258,43 +413,55 @@ function sortPerceptionEntries(entries) {
 }
 
 function buildNpcPerceptionContext(stateRef, npc) {
-  const selfTile = resolveNpcRuntimeTile(npc);
+  const selfNpc = ensureNpcRuntimeState(npc) || {};
+  const selfTile = resolveNpcRuntimeTile(selfNpc);
   const window = createPerceptionWindowBounds(selfTile);
   const players = [];
   const npcs = [];
   const resources = [];
 
-  Object.values(stateRef.players || {}).forEach((player) => {
-    if (!isRecord(player)) return;
-    if (!isValidTileCoordinate(player.x, player.y, MAP_WIDTH, MAP_HEIGHT)) return;
-    const playerId = normalizeRuntimeId(player.id);
-    if (!playerId) return;
+  if (!OBSERVER_MODE_ENABLED) {
+    Object.values(stateRef.players || {}).forEach((player) => {
+      if (!isRecord(player)) return;
+      if (!isValidTileCoordinate(player.x, player.y, MAP_WIDTH, MAP_HEIGHT)) return;
+      const playerId = normalizeRuntimeId(player.id);
+      if (!playerId) return;
 
-    const tile = { x: player.x, y: player.y };
-    if (!isTileInsideWindow(tile, window)) return;
+      const tile = { x: player.x, y: player.y };
+      if (!isTileInsideWindow(tile, window)) return;
 
-    players.push({
-      id: playerId,
-      name: typeof player.name === "string" ? player.name : "",
-      x: tile.x,
-      y: tile.y,
-      distance: getTileDistance(selfTile, tile),
+      players.push({
+        id: playerId,
+        name: typeof player.name === "string" ? player.name : "",
+        x: tile.x,
+        y: tile.y,
+        distance: getTileDistance(selfTile, tile),
+      });
     });
-  });
+  }
 
   Object.values(stateRef.npcs || {}).forEach((otherNpc) => {
-    if (!isRecord(otherNpc)) return;
+    const otherNpcRef = ensureNpcRuntimeState(otherNpc);
+    if (!isRecord(otherNpcRef)) return;
 
-    const npcId = normalizeRuntimeId(otherNpc.id);
-    const selfId = normalizeRuntimeId(npc.id);
+    const npcId = normalizeRuntimeId(otherNpcRef.id);
+    const selfId = normalizeRuntimeId(selfNpc.id);
     if (!npcId || npcId === selfId) return;
 
-    const tile = resolveNpcRuntimeTile(otherNpc);
+    const tile = resolveNpcRuntimeTile(otherNpcRef);
     if (!isTileInsideWindow(tile, window)) return;
 
     npcs.push({
       id: npcId,
-      name: typeof otherNpc.name === "string" ? otherNpc.name : "",
+      name: typeof otherNpcRef.name === "string" ? otherNpcRef.name : "",
+      hp: otherNpcRef.hp,
+      alive: otherNpcRef.alive,
+      affinityFromSelf: clampInteger(
+        selfNpc?.affinityByNpcId?.[npcId],
+        0,
+        NPC_AFFINITY_MAX,
+        0
+      ),
       x: tile.x,
       y: tile.y,
       distance: getTileDistance(selfTile, tile),
@@ -327,8 +494,11 @@ function buildNpcPerceptionContext(stateRef, npc) {
 
   return {
     self: {
-      id: normalizeRuntimeId(npc.id),
-      name: typeof npc.name === "string" ? npc.name : "",
+      id: normalizeRuntimeId(selfNpc.id),
+      name: typeof selfNpc.name === "string" ? selfNpc.name : "",
+      hp: selfNpc.hp,
+      alive: selfNpc.alive,
+      inventory: getNpcInventorySummary(selfNpc),
       x: selfTile.x,
       y: selfTile.y,
     },
@@ -622,10 +792,10 @@ function cleanupExpiredNpcExecutions() {
   );
 }
 
-function finalizeNpcActionPlan(rawActions, stateRef) {
+function finalizeNpcActionPlan(rawActions, stateRef, actorNpcId = "") {
   const validation = validateNpcActionList(
     Array.isArray(rawActions) ? rawActions : [],
-    buildNpcActionValidationContext(stateRef)
+    buildNpcActionValidationContext(stateRef, actorNpcId)
   );
 
   if (validation.ok) {
@@ -669,28 +839,10 @@ function dispatchNpcActionPlan(npcId, ownerSocketId, actions) {
 // Game state
 const state = {
   players: {},
-  npcs: {
-    "npc-guide-1": {
-      id: "npc-guide-1",
-      name: "Guide",
-      gender: "unknown",
-      soul: "A calm guide that helps players understand the world.",
-      personaTags: ["guide", "friendly"],
-      spawn: {
-        x: CONFIG.PLAYER_SPAWN_POINT.x + 1,
-        y: CONFIG.PLAYER_SPAWN_POINT.y,
-      },
-      runtimeTile: {
-        x: CONFIG.PLAYER_SPAWN_POINT.x + 1,
-        y: CONFIG.PLAYER_SPAWN_POINT.y,
-      },
-      memorySummary: "Met recently spawned players near the starting area.",
-    },
-  },
-  npcOwners: {
-    "npc-guide-1": SYSTEM_NPC_OWNER,
-  },
+  npcs: {},
+  npcOwners: {},
   chatMessages: [],
+  worldEvents: [],
   resources: worldData.layers[4].objects.reduce(
     (resources, resourceData) => ({
       ...resources,
@@ -705,6 +857,10 @@ const state = {
     {}
   ),
 };
+
+Object.values(state.npcs).forEach((npc) => {
+  ensureNpcRuntimeState(npc);
+});
 
 const npcAutonomousRuntime = {
   isRunning: false,
@@ -743,11 +899,14 @@ async function decideNpcActions({
       "WAIT",
       "INTERACT",
       "COLLECT",
+      "TALK_TO_NPC",
+      "GIFT_TO_NPC",
+      "ATTACK_NPC",
     ],
-    validationContext: buildNpcActionValidationContext(state),
+    validationContext: buildNpcActionValidationContext(state, npc.id),
   });
 
-  const normalizedPlan = finalizeNpcActionPlan(decision.actions, state);
+  const normalizedPlan = finalizeNpcActionPlan(decision.actions, state, npc.id);
 
   return {
     actions: normalizedPlan.actions,
@@ -772,6 +931,8 @@ async function runNpcAutonomousLoop() {
 
       const npcId = npc.id.trim();
       if (!npcId) continue;
+      const runtimeNpc = ensureNpcRuntimeState(npc);
+      if (!runtimeNpc || runtimeNpc.alive === false) continue;
 
       const ownerSocketId = state.npcOwners[npcId];
       if (
@@ -834,6 +995,46 @@ async function runNpcAutonomousLoop() {
   }
 }
 
+function emitWorldNpcMessage({ author, message, npcId, npcName }) {
+  const normalizedMessage = normalizeChatMessage(message);
+  if (!normalizedMessage) return;
+
+  const payload = {
+    author: normalizeRuntimeId(author) || String(author || "System"),
+    message: normalizedMessage,
+    creationDate: Date.now(),
+    channel: "world",
+    npcId: npcId || undefined,
+    npcName: npcName || undefined,
+  };
+
+  io.emit("chat.newMessage", [payload]);
+  appendWorldChatMessage(payload);
+}
+
+function tryReviveDeadNpcs() {
+  const now = Date.now();
+
+  Object.values(state.npcs).forEach((npc) => {
+    const runtimeNpc = ensureNpcRuntimeState(npc);
+    if (!runtimeNpc || runtimeNpc.alive) return;
+    if (!runtimeNpc.deadUntil || now < runtimeNpc.deadUntil) return;
+
+    runtimeNpc.hp = NPC_MAX_HP;
+    runtimeNpc.alive = true;
+    runtimeNpc.deadUntil = 0;
+    runtimeNpc.combatCooldownUntil = 0;
+
+    io.emit("npc.updated", runtimeNpc);
+    emitWorldNpcMessage({
+      author: "System",
+      message: `${runtimeNpc.name} 已复活（HP: ${runtimeNpc.hp}/${NPC_MAX_HP}）。`,
+      npcId: runtimeNpc.id,
+      npcName: runtimeNpc.name,
+    });
+  });
+}
+
 console.log("Alkito Server - Starting...");
 console.log("Resources populated: ", Object.keys(state.resources).length);
 
@@ -885,6 +1086,7 @@ io.on("connection", function (socket) {
 
   socket.on("playerMove", (x, y) => {
     if (!consumeRateLimit(socket, "playerMove", 25, 1000)) return;
+    if (OBSERVER_MODE_ENABLED) return;
 
     const player = state.players[socket.id];
     if (!player) {
@@ -908,32 +1110,69 @@ io.on("connection", function (socket) {
     socket.broadcast.emit("playerMoved", player);
   });
 
-  socket.on("resource.collect", (id) => {
+  socket.on("resource.collect", (payload) => {
     if (!consumeRateLimit(socket, "resource.collect", 20, 10000)) return;
-    if (!state.resources[id]) {
-      rejectEvent(socket, "resource.collect", "RESOURCE_NOT_FOUND", { id });
+    const resourceId =
+      typeof payload === "string"
+        ? payload.trim()
+        : typeof payload?.resourceId === "string"
+          ? payload.resourceId.trim()
+          : "";
+    const collectorEntityId =
+      typeof payload?.collectorEntityId === "string"
+        ? payload.collectorEntityId.trim()
+        : socket.id;
+
+    if (!resourceId || !state.resources[resourceId]) {
+      rejectEvent(socket, "resource.collect", "RESOURCE_NOT_FOUND", { resourceId });
       return;
     }
+
+    const isCollectorPlayer = collectorEntityId === socket.id;
+    const isCollectorNpc =
+      !!collectorEntityId && state.npcOwners[collectorEntityId] === socket.id;
+    if (OBSERVER_MODE_ENABLED && isCollectorPlayer) {
+      rejectEvent(socket, "resource.collect", "PLAYER_COLLECT_DISABLED_IN_OBSERVER_MODE", {
+        collectorEntityId,
+      });
+      return;
+    }
+    if (!isCollectorPlayer && !isCollectorNpc) {
+      rejectEvent(socket, "resource.collect", "COLLECTOR_PERMISSION_DENIED", {
+        collectorEntityId,
+        resourceId,
+      });
+      return;
+    }
+
     if (
-      !Number.isInteger(state.resources[id].level) ||
-      state.resources[id].level < RESOURCE_MAX_LEVEL
+      !Number.isInteger(state.resources[resourceId].level) ||
+      state.resources[resourceId].level < RESOURCE_MAX_LEVEL
     ) {
       rejectEvent(socket, "resource.collect", "RESOURCE_NOT_READY", {
-        id,
-        level: state.resources[id].level,
+        resourceId,
+        level: state.resources[resourceId].level,
         requiredLevel: RESOURCE_MAX_LEVEL,
       });
       return;
     }
 
-    console.log("Resource", id, "collected");
+    console.log("Resource", resourceId, "collected");
     const newResource = {
-      ...state.resources[id],
+      ...state.resources[resourceId],
       level: 1,
       lastTimeGrown: Date.now(),
     };
 
-    state.resources[id] = newResource;
+    state.resources[resourceId] = newResource;
+
+    if (isCollectorNpc && state.npcs[collectorEntityId]) {
+      const drop = getResourceDrop(newResource);
+      if (drop) {
+        addNpcInventoryItem(state.npcs[collectorEntityId], drop.itemId, drop.quantity);
+        io.emit("npc.updated", state.npcs[collectorEntityId]);
+      }
+    }
 
     io.emit("resource.grown", newResource.id, newResource.level);
   });
@@ -963,16 +1202,22 @@ io.on("connection", function (socket) {
       return;
     }
 
-    state.npcs[sanitizedNpc.id] = {
+    state.npcs[sanitizedNpc.id] = ensureNpcRuntimeState({
       ...sanitizedNpc,
       runtimeTile: {
         x: sanitizedNpc.spawn.x,
         y: sanitizedNpc.spawn.y,
       },
-    };
+      hp: NPC_MAX_HP,
+      alive: true,
+      inventory: {},
+      affinityByNpcId: {},
+      combatCooldownUntil: 0,
+      deadUntil: 0,
+    });
     state.npcOwners[sanitizedNpc.id] = socket.id;
     npcAutonomousRuntime.lastDecisionAtByNpc[sanitizedNpc.id] = 0;
-    io.emit("npc.created", sanitizedNpc);
+    io.emit("npc.created", state.npcs[sanitizedNpc.id]);
 
     const ownerPlayer = state.players[socket.id];
     setTimeout(async () => {
@@ -981,7 +1226,7 @@ io.on("connection", function (socket) {
 
       try {
         const plan = await decideNpcActions({
-          npc: sanitizedNpc,
+          npc: state.npcs[sanitizedNpc.id],
           triggerType: "spawn",
           playerId: ownerPlayer?.id || socket.id,
           playerName: ownerPlayer?.name || "",
@@ -1050,10 +1295,11 @@ io.on("connection", function (socket) {
 
     const mergedNpc = sanitizeResult.value;
     const runtimeTile = resolveNpcRuntimeTile(state.npcs[npcId]);
-    state.npcs[npcId] = {
+    state.npcs[npcId] = ensureNpcRuntimeState({
+      ...state.npcs[npcId],
       ...mergedNpc,
       runtimeTile,
-    };
+    });
     io.emit("npc.updated", state.npcs[npcId]);
   });
 
@@ -1106,7 +1352,7 @@ io.on("connection", function (socket) {
 
     const validation = validateNpcActionList(
       actions,
-      buildNpcActionValidationContext(state)
+      buildNpcActionValidationContext(state, targetNpcId)
     );
     if (!validation.ok) {
       rejectEvent(socket, "npc.executeActions", validation.reason, validation.details);
@@ -1132,6 +1378,11 @@ io.on("connection", function (socket) {
     const npc = state.npcs[npcId];
     if (!npc) {
       rejectEvent(socket, "npc.brain.decide", "NPC_NOT_FOUND", { npcId });
+      return;
+    }
+    const runtimeNpc = ensureNpcRuntimeState(npc);
+    if (!runtimeNpc.alive) {
+      rejectEvent(socket, "npc.brain.decide", "NPC_IS_DEAD", { npcId });
       return;
     }
 
@@ -1214,6 +1465,248 @@ io.on("connection", function (socket) {
     trackNpcExecutionResult(execution, report, socket.id);
   });
 
+  socket.on("world.event.inject", (payload) => {
+    if (!consumeRateLimit(socket, "world.event.inject", 6, 10000)) return;
+    const description = normalizeWorldEventDescription(payload?.description);
+    if (!description) {
+      rejectEvent(socket, "world.event.inject", "INVALID_WORLD_EVENT_DESCRIPTION");
+      return;
+    }
+
+    const worldEvent = {
+      id: `world-event-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      description,
+      createdAt: Date.now(),
+      creatorSocketId: socket.id,
+      creatorName: state.players[socket.id]?.name || "Observer",
+    };
+    state.worldEvents.push(worldEvent);
+    if (state.worldEvents.length > MAX_WORLD_EVENTS) {
+      state.worldEvents = state.worldEvents.slice(
+        state.worldEvents.length - MAX_WORLD_EVENTS
+      );
+    }
+
+    Object.keys(npcAutonomousRuntime.lastDecisionAtByNpc).forEach((npcId) => {
+      npcAutonomousRuntime.lastDecisionAtByNpc[npcId] = 0;
+    });
+
+    emitWorldNpcMessage({
+      author: "WorldEvent",
+      message: `世界事件：${description}`,
+    });
+  });
+
+  socket.on("npc.social.talk", (payload) => {
+    if (!consumeRateLimit(socket, "npc.social.talk", 20, 10000)) return;
+    const fromNpcId =
+      typeof payload?.fromNpcId === "string" ? payload.fromNpcId.trim() : "";
+    const targetNpcId =
+      typeof payload?.targetNpcId === "string" ? payload.targetNpcId.trim() : "";
+    const text = normalizeChatMessage(payload?.text);
+    if (!fromNpcId || !targetNpcId || !text) {
+      rejectEvent(socket, "npc.social.talk", "INVALID_PAYLOAD");
+      return;
+    }
+    if (!canManageNpc(socket.id, fromNpcId, state.npcOwners)) {
+      rejectEvent(socket, "npc.social.talk", "NPC_PERMISSION_DENIED", { fromNpcId });
+      return;
+    }
+
+    const fromNpc = ensureNpcRuntimeState(state.npcs[fromNpcId]);
+    const targetNpc = ensureNpcRuntimeState(state.npcs[targetNpcId]);
+    if (!fromNpc || !targetNpc) {
+      rejectEvent(socket, "npc.social.talk", "NPC_NOT_FOUND", {
+        fromNpcId,
+        targetNpcId,
+      });
+      return;
+    }
+    if (!fromNpc.alive || !targetNpc.alive) {
+      rejectEvent(socket, "npc.social.talk", "NPC_IS_DEAD", {
+        fromNpcId,
+        targetNpcId,
+      });
+      return;
+    }
+
+    fromNpc.lastInteractionAt = Date.now();
+    targetNpc.lastInteractionAt = Date.now();
+    emitWorldNpcMessage({
+      author: fromNpc.name,
+      message: `对 ${targetNpc.name} 说：${text}`,
+      npcId: fromNpc.id,
+      npcName: fromNpc.name,
+    });
+  });
+
+  socket.on("npc.social.gift", (payload) => {
+    if (!consumeRateLimit(socket, "npc.social.gift", 20, 10000)) return;
+    const fromNpcId =
+      typeof payload?.fromNpcId === "string" ? payload.fromNpcId.trim() : "";
+    const targetNpcId =
+      typeof payload?.targetNpcId === "string" ? payload.targetNpcId.trim() : "";
+    const itemId =
+      typeof payload?.itemId === "string" ? payload.itemId.trim() : "";
+    const quantity = Number.isInteger(payload?.quantity) ? payload.quantity : 0;
+    if (!fromNpcId || !targetNpcId || !itemId || quantity <= 0 || quantity > 99) {
+      rejectEvent(socket, "npc.social.gift", "INVALID_PAYLOAD");
+      return;
+    }
+    if (!canManageNpc(socket.id, fromNpcId, state.npcOwners)) {
+      rejectEvent(socket, "npc.social.gift", "NPC_PERMISSION_DENIED", { fromNpcId });
+      return;
+    }
+    if (!itemsData[itemId]) {
+      rejectEvent(socket, "npc.social.gift", "INVALID_ITEM_ID", { itemId });
+      return;
+    }
+
+    const fromNpc = ensureNpcRuntimeState(state.npcs[fromNpcId]);
+    const targetNpc = ensureNpcRuntimeState(state.npcs[targetNpcId]);
+    if (!fromNpc || !targetNpc) {
+      rejectEvent(socket, "npc.social.gift", "NPC_NOT_FOUND", {
+        fromNpcId,
+        targetNpcId,
+      });
+      return;
+    }
+    if (!fromNpc.alive || !targetNpc.alive) {
+      rejectEvent(socket, "npc.social.gift", "NPC_IS_DEAD", {
+        fromNpcId,
+        targetNpcId,
+      });
+      return;
+    }
+
+    const removed = removeNpcInventoryItem(fromNpc, itemId, quantity);
+    if (removed < quantity) {
+      rejectEvent(socket, "npc.social.gift", "NPC_ITEM_NOT_ENOUGH", {
+        fromNpcId,
+        targetNpcId,
+        itemId,
+        required: quantity,
+      });
+      return;
+    }
+
+    addNpcInventoryItem(targetNpc, itemId, quantity);
+    const itemPrice = Number.isFinite(itemsData[itemId]?.price)
+      ? Math.max(1, Math.floor(itemsData[itemId].price))
+      : 1;
+    const affinityDelta = increaseNpcAffinity(
+      targetNpc,
+      fromNpc.id,
+      Math.min(30, itemPrice * quantity)
+    );
+
+    io.emit("npc.updated", fromNpc);
+    io.emit("npc.updated", targetNpc);
+
+    emitWorldNpcMessage({
+      author: fromNpc.name,
+      message: `向 ${targetNpc.name} 赠送了 ${itemId} x${quantity}，好感 +${affinityDelta}。`,
+      npcId: fromNpc.id,
+      npcName: fromNpc.name,
+    });
+  });
+
+  socket.on("npc.combat.attack", (payload) => {
+    if (!consumeRateLimit(socket, "npc.combat.attack", 25, 10000)) return;
+    const fromNpcId =
+      typeof payload?.fromNpcId === "string" ? payload.fromNpcId.trim() : "";
+    const targetNpcId =
+      typeof payload?.targetNpcId === "string" ? payload.targetNpcId.trim() : "";
+    if (!fromNpcId || !targetNpcId) {
+      rejectEvent(socket, "npc.combat.attack", "INVALID_PAYLOAD");
+      return;
+    }
+    if (!canManageNpc(socket.id, fromNpcId, state.npcOwners)) {
+      rejectEvent(socket, "npc.combat.attack", "NPC_PERMISSION_DENIED", {
+        fromNpcId,
+      });
+      return;
+    }
+    if (fromNpcId === targetNpcId) {
+      rejectEvent(socket, "npc.combat.attack", "ATTACK_SELF_FORBIDDEN", {
+        fromNpcId,
+      });
+      return;
+    }
+
+    const fromNpc = ensureNpcRuntimeState(state.npcs[fromNpcId]);
+    const targetNpc = ensureNpcRuntimeState(state.npcs[targetNpcId]);
+    if (!fromNpc || !targetNpc) {
+      rejectEvent(socket, "npc.combat.attack", "NPC_NOT_FOUND", {
+        fromNpcId,
+        targetNpcId,
+      });
+      return;
+    }
+    if (!fromNpc.alive || !targetNpc.alive) {
+      rejectEvent(socket, "npc.combat.attack", "NPC_IS_DEAD", {
+        fromNpcId,
+        targetNpcId,
+      });
+      return;
+    }
+
+    const now = Date.now();
+    if (fromNpc.combatCooldownUntil && fromNpc.combatCooldownUntil > now) {
+      rejectEvent(socket, "npc.combat.attack", "ATTACK_COOLDOWN", {
+        fromNpcId,
+        cooldownRemainingMs: fromNpc.combatCooldownUntil - now,
+      });
+      return;
+    }
+
+    const fromTile = resolveNpcRuntimeTile(fromNpc);
+    const targetTile = resolveNpcRuntimeTile(targetNpc);
+    const distance = getTileDistance(fromTile, targetTile);
+    if (distance > 3) {
+      rejectEvent(socket, "npc.combat.attack", "ATTACK_TARGET_TOO_FAR", {
+        fromNpcId,
+        targetNpcId,
+        distance,
+      });
+      return;
+    }
+
+    fromNpc.combatCooldownUntil = now + NPC_ATTACK_COOLDOWN_MS;
+    targetNpc.hp = clampInteger(
+      targetNpc.hp - NPC_ATTACK_DAMAGE,
+      0,
+      NPC_MAX_HP,
+      0
+    );
+    targetNpc.lastInteractionAt = now;
+
+    if (targetNpc.hp <= 0) {
+      targetNpc.alive = false;
+      targetNpc.deadUntil = now + NPC_REVIVE_DELAY_MS;
+    }
+
+    io.emit("npc.updated", targetNpc);
+
+    emitWorldNpcMessage({
+      author: fromNpc.name,
+      message: `攻击了 ${targetNpc.name}，造成 ${NPC_ATTACK_DAMAGE} 点伤害（${targetNpc.hp}/${NPC_MAX_HP}）。`,
+      npcId: fromNpc.id,
+      npcName: fromNpc.name,
+    });
+
+    if (!targetNpc.alive) {
+      emitWorldNpcMessage({
+        author: "System",
+        message: `${targetNpc.name} 已被击倒，${Math.floor(
+          NPC_REVIVE_DELAY_MS / 1000
+        )} 秒后复活。`,
+        npcId: targetNpc.id,
+        npcName: targetNpc.name,
+      });
+    }
+  });
+
   socket.on("npc.chat.send", async (payload) => {
     if (!consumeRateLimit(socket, "npc.chat.send", 8, 10000)) return;
     const npcId =
@@ -1228,6 +1721,11 @@ io.on("connection", function (socket) {
     const player = state.players[socket.id];
     if (!npc || !player) {
       rejectEvent(socket, "npc.chat.send", "NPC_OR_PLAYER_NOT_FOUND", { npcId });
+      return;
+    }
+    const runtimeNpc = ensureNpcRuntimeState(npc);
+    if (!runtimeNpc.alive) {
+      rejectEvent(socket, "npc.chat.send", "NPC_IS_DEAD", { npcId });
       return;
     }
 
@@ -1343,6 +1841,11 @@ io.on("connection", function (socket) {
         rejectEvent(socket, "chat.sendNewMessage", "NPC_PERMISSION_DENIED", { npcId });
         return;
       }
+      const runtimeNpc = ensureNpcRuntimeState(npc);
+      if (!runtimeNpc.alive) {
+        rejectEvent(socket, "chat.sendNewMessage", "NPC_IS_DEAD", { npcId });
+        return;
+      }
 
       sanitizedMessage.author = npc.name;
       sanitizedMessage.npcId = npc.id;
@@ -1382,14 +1885,7 @@ io.on("connection", function (socket) {
     }
 
     io.emit("chat.newMessage", [sanitizedMessage]);
-
-    state.chatMessages.push(sanitizedMessage);
-
-    // Keep only MAX_CHAT_HISTORY messages
-    if (state.chatMessages.length > MAX_CHAT_HISTORY) {
-      const indexToCut = state.chatMessages.length - MAX_CHAT_HISTORY;
-      state.chatMessages = state.chatMessages.slice(indexToCut);
-    }
+    appendWorldChatMessage(sanitizedMessage);
   });
 });
 
@@ -1421,6 +1917,7 @@ setInterval(() => {
 
 setInterval(() => {
   void runNpcAutonomousLoop();
+  tryReviveDeadNpcs();
 }, NPC_AUTONOMOUS_TICK_MS);
 
 setInterval(() => {

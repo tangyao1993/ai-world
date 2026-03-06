@@ -13,6 +13,7 @@ import {
   ChatMessage,
   NpcBrainDecisionRequest,
   NpcChatRequest,
+  WorldEventInjectRequest,
 } from "../types/Chat";
 import NotificationManager from "../services/NotificationManager";
 import NotificationContainer from "../ui-components/NotificationsContainer";
@@ -114,6 +115,21 @@ export default class UIScene extends Phaser.Scene {
   handleSendChatMessage = (message: string) => {
     const normalizedMessage = message.trim();
     if (!normalizedMessage) return;
+
+    if (/^\/world-event(\s|$)/i.test(normalizedMessage)) {
+      const description = normalizedMessage
+        .replace(/^\/world-event\s*/i, "")
+        .trim();
+      if (!description) {
+        this.notificationManager.addNotif("用法: /world-event <事件描述>");
+        return;
+      }
+
+      const request: WorldEventInjectRequest = { description };
+      this.emitter.emit(ActionType.WORLD_EVENT_INJECT, request);
+      this.notificationManager.addNotif("世界事件已注入");
+      return;
+    }
 
     if (/^\/npc-brain(\s|$)/i.test(normalizedMessage)) {
       const args = normalizedMessage.split(/\s+/);

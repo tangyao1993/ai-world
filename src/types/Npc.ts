@@ -1,4 +1,6 @@
 export type NpcGender = "male" | "female" | "non_binary" | "unknown";
+export type NpcInventory = Record<string, number>;
+export type NpcAffinityByNpcId = Record<string, number>;
 
 export interface NpcSpawnPoint {
   x: number;
@@ -13,6 +15,10 @@ export interface NpcSnapshot {
   personaTags: string[];
   spawn: NpcSpawnPoint;
   memorySummary: string;
+  hp: number;
+  alive: boolean;
+  inventory: NpcInventory;
+  affinityByNpcId: NpcAffinityByNpcId;
 }
 
 export interface NpcCreateRequest {
@@ -42,5 +48,15 @@ export function createNpcSnapshot(
       y: input.spawn?.y ?? 0,
     },
     memorySummary: input.memorySummary ?? "",
+    hp: Number.isFinite(input.hp) ? Math.max(0, Math.floor(input.hp as number)) : 100,
+    alive: typeof input.alive === "boolean" ? input.alive : true,
+    inventory:
+      input.inventory && typeof input.inventory === "object"
+        ? { ...input.inventory }
+        : {},
+    affinityByNpcId:
+      input.affinityByNpcId && typeof input.affinityByNpcId === "object"
+        ? { ...input.affinityByNpcId }
+        : {},
   };
 }

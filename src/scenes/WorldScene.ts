@@ -9,7 +9,7 @@ import Player from "../models/Player";
 import OtherPlayer from "../models/OtherPlayer";
 import ResourceEntity from "../models/ResourceEntity";
 import Npc from "../models/Npc";
-import Entity from "../models/Entity";
+import Entity, { EntityType } from "../models/Entity";
 import EventDispatcher from "../services/EventDispatcher";
 import EntityActionManager from "../services/EntityActionManager";
 import EntityActionProcessor from "../services/EntityActionProcessor";
@@ -22,6 +22,13 @@ import NpcActionExecutor, {
   NpcActionExecutionResult,
 } from "../services/NpcActionExecutor";
 import { createNpcSnapshot, NpcSnapshot } from "../types/Npc";
+
+const GOD_VIEW_MODE = true;
+const GOD_CAMERA_MOVE_SPEED = 480;
+const GOD_CAMERA_DEFAULT_ZOOM = 1;
+const GOD_CAMERA_MIN_ZOOM = 0.45;
+const GOD_CAMERA_MAX_ZOOM = 2.2;
+const GOD_CAMERA_WHEEL_STEP = 0.1;
 
 type MapLayer = Phaser.Tilemaps.TilemapLayer;
 
@@ -46,6 +53,13 @@ export default class WorldScene extends Phaser.Scene {
   otherPlayers: { [key: string]: OtherPlayer } = {};
   npcs: { [key: string]: Npc } = {};
   resources: { [key: string]: ResourceEntity } = {};
+  godCursors?: Phaser.Types.Input.Keyboard.CursorKeys;
+  godKeys?: {
+    w: Phaser.Input.Keyboard.Key;
+    a: Phaser.Input.Keyboard.Key;
+    s: Phaser.Input.Keyboard.Key;
+    d: Phaser.Input.Keyboard.Key;
+  };
 
   constructor() {
     super("WorldScene");
@@ -74,15 +88,24 @@ export default class WorldScene extends Phaser.Scene {
       this.player.avatar = player.avatar;
       this.entityActions.registerEntity(this.player);
 
-      // Camera follow player
       this.cameras.main.setBounds(
         0,
         0,
         this.map.widthInPixels,
         this.map.heightInPixels
       );
-      this.cameras.main.startFollow(this.player);
       this.cameras.main.roundPixels = true;
+
+      if (GOD_VIEW_MODE) {
+        this.player.setVisible(false);
+        this.cameras.main.stopFollow();
+        // Use spawn point as initial anchor so scene opens at an area with content.
+        this.cameras.main.centerOn(this.player.x, this.player.y);
+        this.cameras.main.setZoom(GOD_CAMERA_DEFAULT_ZOOM);
+        this.setupGodCameraControls();
+      } else {
+        this.cameras.main.startFollow(this.player);
+      }
 
       this._createEvents();
 
@@ -315,6 +338,15 @@ export default class WorldScene extends Phaser.Scene {
     this.emitter.on(
       ActionType.ENTITY_SELECT,
       (unit: Entity | null, flag: boolean = true) => {
+        if (
+          GOD_VIEW_MODE &&
+          unit &&
+          unit.unitType !== EntityType.PNJ &&
+          unit.unitType !== EntityType.ENEMY
+        ) {
+          return;
+        }
+
         if (this.currentSelection) {
           this.currentSelection.select(false);
         }
@@ -328,6 +360,13 @@ export default class WorldScene extends Phaser.Scene {
   }
 
   onMapClick = (pointer: Phaser.Input.Pointer) => {
+    if (GOD_VIEW_MODE) {
+      if (this.currentSelection) {
+        this.emitter.emit(ActionType.ENTITY_SELECT, null);
+      }
+      return;
+    }
+
     // If something is selected, unselected
     if (this.currentSelection) {
       this.emitter.emit(ActionType.ENTITY_SELECT, null);
@@ -362,6 +401,21 @@ export default class WorldScene extends Phaser.Scene {
 
   update() {
     if (!this.currentSelection) this.updateMapMarker();
+    if (!GOD_VIEW_MODE || !this.godCursors || !this.godKeys) return;
+
+    const camera = this.cameras.main;
+    const dt = this.game.loop.delta / 1000;
+    const offset = GOD_CAMERA_MOVE_SPEED * dt;
+
+    const left = this.godCursors.left?.isDown || this.godKeys.a?.isDown;
+    const right = this.godCursors.right?.isDown || this.godKeys.d?.isDown;
+    const up = this.godCursors.up?.isDown || this.godKeys.w?.isDown;
+    const down = this.godCursors.down?.isDown || this.godKeys.s?.isDown;
+
+    if (left) camera.scrollX -= offset;
+    if (right) camera.scrollX += offset;
+    if (up) camera.scrollY -= offset;
+    if (down) camera.scrollY += offset;
   }
 
   private updateMapMarker() {
@@ -380,5 +434,60 @@ export default class WorldScene extends Phaser.Scene {
       pointerTileXY.y
     );
     this.marker.setPosition(snappedWorldPoint.x, snappedWorldPoint.y);
+  }
+
+  private setupGodCameraControls() {
+    if (!this.input.keyboard) return;
+
+    this.godCursors = this.input.keyboard.createCursorKeys();
+    this.godKeys = this.input.keyboard.addKeys({
+      w: Phaser.Input.Keyboard.KeyCodes.W,
+      a: Phaser.Input.Keyboard.KeyCodes.A,
+      s: Phaser.Input.Keyboard.KeyCodes.S,
+      d: Phaser.Input.Keyboard.KeyCodes.D,
+    }) as {
+      w: Phaser.Input.Keyboard.Key;
+      a: Phaser.Input.Keyboard.Key;
+      s: Phaser.Input.Keyboard.Key;
+      d: Phaser.Input.Keyboard.Key;
+    };
+
+    // Wheel up -> zoom in, wheel down -> zoom out.
+    this.input.on(
+      "wheel",
+      (
+        _pointer: Phaser.Input.Pointer,
+        _gameObjects: Phaser.GameObjects.GameObject[],
+        _deltaX: number,
+        deltaY: number
+      ) => {
+        const currentZoom = this.cameras.main.zoom;
+        const nextZoom =
+          deltaY < 0
+            ? currentZoom + GOD_CAMERA_WHEEL_STEP
+            : currentZoom - GOD_CAMERA_WHEEL_STEP;
+
+        this.cameras.main.setZoom(
+          Phaser.Math.Clamp(nextZoom, GOD_CAMERA_MIN_ZOOM, GOD_CAMERA_MAX_ZOOM)
+        );
+      }
+    );
+
+    this.input.keyboard.on("keydown-EQUALS", () => {
+      const nextZoom = Phaser.Math.Clamp(
+        this.cameras.main.zoom + GOD_CAMERA_WHEEL_STEP,
+        GOD_CAMERA_MIN_ZOOM,
+        GOD_CAMERA_MAX_ZOOM
+      );
+      this.cameras.main.setZoom(nextZoom);
+    });
+    this.input.keyboard.on("keydown-MINUS", () => {
+      const nextZoom = Phaser.Math.Clamp(
+        this.cameras.main.zoom - GOD_CAMERA_WHEEL_STEP,
+        GOD_CAMERA_MIN_ZOOM,
+        GOD_CAMERA_MAX_ZOOM
+      );
+      this.cameras.main.setZoom(nextZoom);
+    });
   }
 }

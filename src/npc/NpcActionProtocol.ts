@@ -5,6 +5,9 @@ export const NPC_ACTION_WHITELIST = [
   "WAIT",
   "INTERACT",
   "COLLECT",
+  "TALK_TO_NPC",
+  "GIFT_TO_NPC",
+  "ATTACK_NPC",
 ] as const;
 
 export type NpcActionType = (typeof NPC_ACTION_WHITELIST)[number];
@@ -46,13 +49,34 @@ export interface CollectAction {
   resourceId: string;
 }
 
+export interface TalkToNpcAction {
+  type: "TALK_TO_NPC";
+  targetNpcId: string;
+  text: string;
+}
+
+export interface GiftToNpcAction {
+  type: "GIFT_TO_NPC";
+  targetNpcId: string;
+  itemId: string;
+  quantity: number;
+}
+
+export interface AttackNpcAction {
+  type: "ATTACK_NPC";
+  targetNpcId: string;
+}
+
 export type NpcAction =
   | MoveToAction
   | SayAction
   | LookAtAction
   | WaitAction
   | InteractAction
-  | CollectAction;
+  | CollectAction
+  | TalkToNpcAction
+  | GiftToNpcAction
+  | AttackNpcAction;
 
 export interface ValidationIssue {
   code: string;
@@ -69,6 +93,7 @@ const MAX_SAY_LENGTH = 200;
 const MAX_ID_LENGTH = 64;
 const MIN_WAIT_MS = 100;
 const MAX_WAIT_MS = 30000;
+const MAX_GIFT_QUANTITY = 99;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -111,7 +136,7 @@ export function validateNpcAction(action: unknown): ValidationResult<NpcAction> 
           code: "ACTION_NOT_ALLOWED",
           field: "type",
           message:
-            "Action type is not in whitelist. Allowed: MOVE_TO, SAY, LOOK_AT, WAIT, INTERACT, COLLECT.",
+            "Action type is not in whitelist. Allowed: MOVE_TO, SAY, LOOK_AT, WAIT, INTERACT, COLLECT, TALK_TO_NPC, GIFT_TO_NPC, ATTACK_NPC.",
         },
       ],
     };
@@ -407,6 +432,183 @@ export function validateNpcAction(action: unknown): ValidationResult<NpcAction> 
         value: {
           type: "COLLECT",
           resourceId,
+        },
+      };
+    }
+    case "TALK_TO_NPC": {
+      if (typeof action.targetNpcId !== "string") {
+        return {
+          ok: false,
+          errors: [
+            {
+              code: "INVALID_ARG",
+              field: "targetNpcId",
+              message: "targetNpcId must be a string.",
+            },
+          ],
+        };
+      }
+
+      const targetNpcId = action.targetNpcId.trim();
+      if (targetNpcId.length < 1 || targetNpcId.length > MAX_ID_LENGTH) {
+        return {
+          ok: false,
+          errors: [
+            {
+              code: "INVALID_ARG",
+              field: "targetNpcId",
+              message: `targetNpcId length must be in [1, ${MAX_ID_LENGTH}].`,
+            },
+          ],
+        };
+      }
+
+      if (typeof action.text !== "string") {
+        return {
+          ok: false,
+          errors: [
+            {
+              code: "INVALID_ARG",
+              field: "text",
+              message: "text must be a string.",
+            },
+          ],
+        };
+      }
+
+      const text = action.text.trim();
+      if (text.length < 1 || text.length > MAX_SAY_LENGTH) {
+        return {
+          ok: false,
+          errors: [
+            {
+              code: "INVALID_ARG",
+              field: "text",
+              message: `text length must be in [1, ${MAX_SAY_LENGTH}].`,
+            },
+          ],
+        };
+      }
+
+      return {
+        ok: true,
+        value: {
+          type: "TALK_TO_NPC",
+          targetNpcId,
+          text,
+        },
+      };
+    }
+    case "GIFT_TO_NPC": {
+      if (typeof action.targetNpcId !== "string") {
+        return {
+          ok: false,
+          errors: [
+            {
+              code: "INVALID_ARG",
+              field: "targetNpcId",
+              message: "targetNpcId must be a string.",
+            },
+          ],
+        };
+      }
+
+      if (typeof action.itemId !== "string") {
+        return {
+          ok: false,
+          errors: [
+            {
+              code: "INVALID_ARG",
+              field: "itemId",
+              message: "itemId must be a string.",
+            },
+          ],
+        };
+      }
+
+      if (!isIntegerInRange(action.quantity, 1, MAX_GIFT_QUANTITY)) {
+        return {
+          ok: false,
+          errors: [
+            {
+              code: "INVALID_ARG",
+              field: "quantity",
+              message: `quantity must be an integer in [1, ${MAX_GIFT_QUANTITY}].`,
+            },
+          ],
+        };
+      }
+
+      const targetNpcId = action.targetNpcId.trim();
+      const itemId = action.itemId.trim();
+      if (targetNpcId.length < 1 || targetNpcId.length > MAX_ID_LENGTH) {
+        return {
+          ok: false,
+          errors: [
+            {
+              code: "INVALID_ARG",
+              field: "targetNpcId",
+              message: `targetNpcId length must be in [1, ${MAX_ID_LENGTH}].`,
+            },
+          ],
+        };
+      }
+      if (itemId.length < 1 || itemId.length > MAX_ID_LENGTH) {
+        return {
+          ok: false,
+          errors: [
+            {
+              code: "INVALID_ARG",
+              field: "itemId",
+              message: `itemId length must be in [1, ${MAX_ID_LENGTH}].`,
+            },
+          ],
+        };
+      }
+
+      return {
+        ok: true,
+        value: {
+          type: "GIFT_TO_NPC",
+          targetNpcId,
+          itemId,
+          quantity: action.quantity,
+        },
+      };
+    }
+    case "ATTACK_NPC": {
+      if (typeof action.targetNpcId !== "string") {
+        return {
+          ok: false,
+          errors: [
+            {
+              code: "INVALID_ARG",
+              field: "targetNpcId",
+              message: "targetNpcId must be a string.",
+            },
+          ],
+        };
+      }
+
+      const targetNpcId = action.targetNpcId.trim();
+      if (targetNpcId.length < 1 || targetNpcId.length > MAX_ID_LENGTH) {
+        return {
+          ok: false,
+          errors: [
+            {
+              code: "INVALID_ARG",
+              field: "targetNpcId",
+              message: `targetNpcId length must be in [1, ${MAX_ID_LENGTH}].`,
+            },
+          ],
+        };
+      }
+
+      return {
+        ok: true,
+        value: {
+          type: "ATTACK_NPC",
+          targetNpcId,
         },
       };
     }

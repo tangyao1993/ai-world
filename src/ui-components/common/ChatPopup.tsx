@@ -98,7 +98,7 @@ export default class ChatPopup extends PureComponent<Props, State> {
               inverted
               size="small"
               icon={<Icon inverted link name='send' onClick={this.handleSendmessage} />}
-              placeholder='世界聊天: 直接输入；NPC私聊: /npc <NPC_ID> <内容>'
+              placeholder='世界聊天: 直接输入；NPC私聊: /npc <NPC_ID> <内容>；上帝事件: /world-event <描述>'
               style={{ margin: 7, backgroundColor: 'red !important' }}
               className="alkito-chat-input"
             />

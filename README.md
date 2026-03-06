@@ -84,6 +84,7 @@ export NPC_BRAIN_AUTONOMOUS_TICK_MS=1000
 - 世界聊天：直接输入消息
 - NPC 私聊：`/npc <NPC_ID> <消息内容>`
 - 手动触发 NPC 决策：`/npc-brain <NPC_ID> [上下文]`
+- 上帝注入世界事件：`/world-event <事件描述>`
 - 创建 NPC：UI 菜单中的 `BOOK` 按钮进入创建弹窗
 - 自主行为：玩家创建的 NPC 会在创建后自动触发一次决策，并按间隔持续自动决策
 

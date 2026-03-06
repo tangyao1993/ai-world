@@ -5,6 +5,7 @@ import {
   ChatMessage,
   NpcBrainDecisionRequest,
   NpcChatRequest,
+  WorldEventInjectRequest,
 } from "../types/Chat";
 import { Tilemaps } from "phaser";
 import Player from "../models/Player";
@@ -14,6 +15,11 @@ import ResourceEntity from "../models/ResourceEntity";
 import { NpcCreateRequest, NpcSnapshot } from "../types/Npc";
 import { NpcActionExecutionResult } from "./NpcActionExecutor";
 import CONFIG from "../gameConfig.json";
+import {
+  AttackNpcAction,
+  GiftToNpcAction,
+  TalkToNpcAction,
+} from "../npc/NpcActionProtocol";
 
 type NpcActionExecutionMeta = {
   executionId?: string;
@@ -80,9 +86,54 @@ export default class ServerConnectorService implements EventListener {
         this.server.emit("npc.brain.decide", request);
       }
     );
+    this.emitter.on(
+      ActionType.WORLD_EVENT_INJECT,
+      (request: WorldEventInjectRequest) => {
+        this.server.emit("world.event.inject", request);
+      }
+    );
     this.emitter.on(ActionType.NPC_CREATE, (request: NpcCreateRequest) => {
       this.server.emit("npc.create", request);
     });
+    this.emitter.on(
+      ActionType.NPC_TALK_TO_NPC,
+      (unit: Player, action: TalkToNpcAction) => {
+        const npcId = typeof unit?.id === "string" ? unit.id.trim() : "";
+        if (!this.canExecuteNpcSocialAction(npcId)) return;
+
+        this.server.emit("npc.social.talk", {
+          fromNpcId: npcId,
+          targetNpcId: action.targetNpcId,
+          text: action.text,
+        });
+      }
+    );
+    this.emitter.on(
+      ActionType.NPC_GIFT_TO_NPC,
+      (unit: Player, action: GiftToNpcAction) => {
+        const npcId = typeof unit?.id === "string" ? unit.id.trim() : "";
+        if (!this.canExecuteNpcSocialAction(npcId)) return;
+
+        this.server.emit("npc.social.gift", {
+          fromNpcId: npcId,
+          targetNpcId: action.targetNpcId,
+          itemId: action.itemId,
+          quantity: action.quantity,
+        });
+      }
+    );
+    this.emitter.on(
+      ActionType.NPC_ATTACK_NPC,
+      (unit: Player, action: AttackNpcAction) => {
+        const npcId = typeof unit?.id === "string" ? unit.id.trim() : "";
+        if (!this.canExecuteNpcSocialAction(npcId)) return;
+
+        this.server.emit("npc.combat.attack", {
+          fromNpcId: npcId,
+          targetNpcId: action.targetNpcId,
+        });
+      }
+    );
     this.emitter.on(
       ActionType.ENTITY_GO_TO,
       (_player: Player, tile: Tilemaps.Tile) => {
@@ -107,7 +158,10 @@ export default class ServerConnectorService implements EventListener {
           if (!ownerSocketId || ownerSocketId !== localSocketId) return;
         }
 
-        this.server.emit("resource.collect", resource.resourceId);
+        this.server.emit("resource.collect", {
+          resourceId: resource.resourceId,
+          collectorEntityId: unitId,
+        });
       }
     );
   }
@@ -300,5 +354,18 @@ export default class ServerConnectorService implements EventListener {
         errors: result.errors,
       },
     });
+  }
+
+  private canExecuteNpcSocialAction(npcId: string): boolean {
+    if (!npcId) return false;
+
+    const ownerSocketId =
+      typeof this.npcExecutionOwnerByNpc[npcId] === "string"
+        ? this.npcExecutionOwnerByNpc[npcId]
+        : "";
+    const localSocketId = this.world.player?.id;
+    if (!ownerSocketId || !localSocketId) return false;
+
+    return ownerSocketId === localSocketId;
   }
 }
