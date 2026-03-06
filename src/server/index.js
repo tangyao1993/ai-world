@@ -37,6 +37,8 @@ const NPC_AUTONOMOUS_TICK_MS = (() => {
 const NPC_AUTONOMOUS_INITIAL_DELAY_MS = 800;
 const MAP_WIDTH = Number.isInteger(worldData.width) ? worldData.width : 0;
 const MAP_HEIGHT = Number.isInteger(worldData.height) ? worldData.height : 0;
+const NPC_PERCEPTION_WINDOW_WIDTH_TILES = 24;
+const NPC_PERCEPTION_WINDOW_HEIGHT_TILES = 14;
 
 const rateLimiter = createRateLimiter();
 const npcBrainService = new NpcBrainService();
@@ -123,7 +125,19 @@ function buildNpcActionValidationContext(stateRef) {
     mapHeight: MAP_HEIGHT,
     players: stateRef.players,
     npcs: stateRef.npcs,
+    resources: stateRef.resources,
+    resourceMaxLevel: RESOURCE_MAX_LEVEL,
     maxSayLength: MAX_CHAT_MESSAGE_LENGTH,
+  };
+}
+
+function buildNpcWorldContext(stateRef, npc) {
+  return {
+    onlinePlayerCount: Object.keys(stateRef.players || {}).length,
+    npcCount: Object.keys(stateRef.npcs || {}).length,
+    mapWidth: MAP_WIDTH,
+    mapHeight: MAP_HEIGHT,
+    perception: buildNpcPerceptionContext(stateRef, npc),
   };
 }
 
@@ -139,6 +153,190 @@ function buildNpcFallbackWaitActions() {
 function normalizeBrainContext(value) {
   if (typeof value !== "string") return "";
   return value.trim().slice(0, 240);
+}
+
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeRuntimeId(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(Math.trunc(value));
+  }
+
+  if (typeof value !== "string") return "";
+  return value.trim().slice(0, 64);
+}
+
+function hasValidTile(tile) {
+  if (!isRecord(tile)) return false;
+
+  return isValidTileCoordinate(tile.x, tile.y, MAP_WIDTH, MAP_HEIGHT);
+}
+
+function resolveNpcRuntimeTile(npc) {
+  if (isRecord(npc?.runtimeTile) && hasValidTile(npc.runtimeTile)) {
+    return {
+      x: npc.runtimeTile.x,
+      y: npc.runtimeTile.y,
+    };
+  }
+
+  if (isRecord(npc?.spawn) && hasValidTile(npc.spawn)) {
+    return {
+      x: npc.spawn.x,
+      y: npc.spawn.y,
+    };
+  }
+
+  return { x: 0, y: 0 };
+}
+
+function toTileCoordinate(worldCoordinate) {
+  if (typeof worldCoordinate !== "number" || !Number.isFinite(worldCoordinate)) {
+    return null;
+  }
+
+  return Math.floor(worldCoordinate / CONFIG.TILE_SIZE);
+}
+
+function resolveResourceTile(resource) {
+  if (!isRecord(resource)) return null;
+
+  const x = toTileCoordinate(resource.x);
+  const y = toTileCoordinate(resource.y);
+  if (!Number.isInteger(x) || !Number.isInteger(y)) return null;
+  if (!isValidTileCoordinate(x, y, MAP_WIDTH, MAP_HEIGHT)) return null;
+
+  return { x, y };
+}
+
+function createPerceptionWindowBounds(centerTile) {
+  const width = Math.max(1, NPC_PERCEPTION_WINDOW_WIDTH_TILES);
+  const height = Math.max(1, NPC_PERCEPTION_WINDOW_HEIGHT_TILES);
+  const leftSpan = Math.floor((width - 1) / 2);
+  const rightSpan = width - 1 - leftSpan;
+  const topSpan = Math.floor((height - 1) / 2);
+  const bottomSpan = height - 1 - topSpan;
+
+  return {
+    minX: Math.max(0, centerTile.x - leftSpan),
+    maxX: Math.min(MAP_WIDTH - 1, centerTile.x + rightSpan),
+    minY: Math.max(0, centerTile.y - topSpan),
+    maxY: Math.min(MAP_HEIGHT - 1, centerTile.y + bottomSpan),
+    widthTiles: width,
+    heightTiles: height,
+    center: {
+      x: centerTile.x,
+      y: centerTile.y,
+    },
+  };
+}
+
+function isTileInsideWindow(tile, bounds) {
+  return (
+    tile.x >= bounds.minX &&
+    tile.x <= bounds.maxX &&
+    tile.y >= bounds.minY &&
+    tile.y <= bounds.maxY
+  );
+}
+
+function getTileDistance(fromTile, toTile) {
+  return Number(
+    Math.hypot(fromTile.x - toTile.x, fromTile.y - toTile.y).toFixed(2)
+  );
+}
+
+function sortPerceptionEntries(entries) {
+  return entries.sort((a, b) => {
+    if (a.distance !== b.distance) return a.distance - b.distance;
+    const aId = typeof a.id === "string" ? a.id : "";
+    const bId = typeof b.id === "string" ? b.id : "";
+    return aId.localeCompare(bId);
+  });
+}
+
+function buildNpcPerceptionContext(stateRef, npc) {
+  const selfTile = resolveNpcRuntimeTile(npc);
+  const window = createPerceptionWindowBounds(selfTile);
+  const players = [];
+  const npcs = [];
+  const resources = [];
+
+  Object.values(stateRef.players || {}).forEach((player) => {
+    if (!isRecord(player)) return;
+    if (!isValidTileCoordinate(player.x, player.y, MAP_WIDTH, MAP_HEIGHT)) return;
+    const playerId = normalizeRuntimeId(player.id);
+    if (!playerId) return;
+
+    const tile = { x: player.x, y: player.y };
+    if (!isTileInsideWindow(tile, window)) return;
+
+    players.push({
+      id: playerId,
+      name: typeof player.name === "string" ? player.name : "",
+      x: tile.x,
+      y: tile.y,
+      distance: getTileDistance(selfTile, tile),
+    });
+  });
+
+  Object.values(stateRef.npcs || {}).forEach((otherNpc) => {
+    if (!isRecord(otherNpc)) return;
+
+    const npcId = normalizeRuntimeId(otherNpc.id);
+    const selfId = normalizeRuntimeId(npc.id);
+    if (!npcId || npcId === selfId) return;
+
+    const tile = resolveNpcRuntimeTile(otherNpc);
+    if (!isTileInsideWindow(tile, window)) return;
+
+    npcs.push({
+      id: npcId,
+      name: typeof otherNpc.name === "string" ? otherNpc.name : "",
+      x: tile.x,
+      y: tile.y,
+      distance: getTileDistance(selfTile, tile),
+    });
+  });
+
+  Object.entries(stateRef.resources || {}).forEach(([resourceKey, resource]) => {
+    const resourceTile = resolveResourceTile(resource);
+    if (!resourceTile || !isTileInsideWindow(resourceTile, window)) return;
+    const isCollectable =
+      Number.isInteger(resource?.level) && resource.level >= RESOURCE_MAX_LEVEL;
+    if (!isCollectable) return;
+
+    const resourceId = normalizeRuntimeId(
+      isRecord(resource) && resource.id !== undefined ? resource.id : resourceKey
+    );
+    if (!resourceId) return;
+
+    resources.push({
+      id: resourceId,
+      resourceId,
+      type: typeof resource?.type === "string" ? resource.type : "",
+      level: Number.isInteger(resource?.level) ? resource.level : 0,
+      isCollectable: true,
+      x: resourceTile.x,
+      y: resourceTile.y,
+      distance: getTileDistance(selfTile, resourceTile),
+    });
+  });
+
+  return {
+    self: {
+      id: normalizeRuntimeId(npc.id),
+      name: typeof npc.name === "string" ? npc.name : "",
+      x: selfTile.x,
+      y: selfTile.y,
+    },
+    window,
+    players: sortPerceptionEntries(players),
+    npcs: sortPerceptionEntries(npcs),
+    resources: sortPerceptionEntries(resources),
+  };
 }
 
 function resolveNpcPrivateReplyText(actions, targetPlayerId) {
@@ -308,10 +506,22 @@ function getNpcExecutionReport(payload) {
     : 0;
   const fallbackApplied = !!result.fallbackApplied;
   const errors = Array.isArray(result.errors) ? result.errors : [];
+  const hasTilePayload = isRecord(payload.npcState) && isRecord(payload.npcState.tile);
+  const tile = hasTilePayload
+    ? {
+        x: payload.npcState.tile.x,
+        y: payload.npcState.tile.y,
+      }
+    : null;
+  const npcState =
+    tile && isValidTileCoordinate(tile.x, tile.y, MAP_WIDTH, MAP_HEIGHT)
+      ? { tile }
+      : undefined;
 
   return {
     executionId,
     npcId,
+    npcState,
     result: {
       ok: result.ok,
       acceptedActions,
@@ -470,6 +680,10 @@ const state = {
         x: CONFIG.PLAYER_SPAWN_POINT.x + 1,
         y: CONFIG.PLAYER_SPAWN_POINT.y,
       },
+      runtimeTile: {
+        x: CONFIG.PLAYER_SPAWN_POINT.x + 1,
+        y: CONFIG.PLAYER_SPAWN_POINT.y,
+      },
       memorySummary: "Met recently spawned players near the starting area.",
     },
   },
@@ -521,13 +735,15 @@ async function decideNpcActions({
       message,
       context,
     },
-    worldContext: {
-      onlinePlayerCount: Object.keys(state.players).length,
-      npcCount: Object.keys(state.npcs).length,
-      mapWidth: MAP_WIDTH,
-      mapHeight: MAP_HEIGHT,
-    },
-    availableActions: ["MOVE_TO", "SAY", "LOOK_AT", "WAIT"],
+    worldContext: buildNpcWorldContext(state, npc),
+    availableActions: [
+      "MOVE_TO",
+      "SAY",
+      "LOOK_AT",
+      "WAIT",
+      "INTERACT",
+      "COLLECT",
+    ],
     validationContext: buildNpcActionValidationContext(state),
   });
 
@@ -698,6 +914,17 @@ io.on("connection", function (socket) {
       rejectEvent(socket, "resource.collect", "RESOURCE_NOT_FOUND", { id });
       return;
     }
+    if (
+      !Number.isInteger(state.resources[id].level) ||
+      state.resources[id].level < RESOURCE_MAX_LEVEL
+    ) {
+      rejectEvent(socket, "resource.collect", "RESOURCE_NOT_READY", {
+        id,
+        level: state.resources[id].level,
+        requiredLevel: RESOURCE_MAX_LEVEL,
+      });
+      return;
+    }
 
     console.log("Resource", id, "collected");
     const newResource = {
@@ -736,7 +963,13 @@ io.on("connection", function (socket) {
       return;
     }
 
-    state.npcs[sanitizedNpc.id] = sanitizedNpc;
+    state.npcs[sanitizedNpc.id] = {
+      ...sanitizedNpc,
+      runtimeTile: {
+        x: sanitizedNpc.spawn.x,
+        y: sanitizedNpc.spawn.y,
+      },
+    };
     state.npcOwners[sanitizedNpc.id] = socket.id;
     npcAutonomousRuntime.lastDecisionAtByNpc[sanitizedNpc.id] = 0;
     io.emit("npc.created", sanitizedNpc);
@@ -816,8 +1049,12 @@ io.on("connection", function (socket) {
     }
 
     const mergedNpc = sanitizeResult.value;
-    state.npcs[npcId] = mergedNpc;
-    io.emit("npc.updated", mergedNpc);
+    const runtimeTile = resolveNpcRuntimeTile(state.npcs[npcId]);
+    state.npcs[npcId] = {
+      ...mergedNpc,
+      runtimeTile,
+    };
+    io.emit("npc.updated", state.npcs[npcId]);
   });
 
   socket.on("npc.remove", (npcId) => {
@@ -964,6 +1201,13 @@ io.on("connection", function (socket) {
         expectedNpcId: execution.npcId,
       });
       return;
+    }
+
+    if (report.npcState?.tile && state.npcs[execution.npcId]) {
+      state.npcs[execution.npcId].runtimeTile = {
+        x: report.npcState.tile.x,
+        y: report.npcState.tile.y,
+      };
     }
 
     delete npcObservability.pendingExecutions[report.executionId];

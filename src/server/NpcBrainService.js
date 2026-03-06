@@ -101,15 +101,13 @@ function toWaitAction(durationMs) {
 }
 
 function buildSystemPrompt(promptPayload, maxActions) {
-  const trigger = isRecord(promptPayload?.trigger) ? promptPayload.trigger : {};
   const world = isRecord(promptPayload?.world) ? promptPayload.world : {};
-  const npc = isRecord(promptPayload?.npc) ? promptPayload.npc : {};
-  const spawn = isRecord(npc.spawn) ? npc.spawn : { x: 0, y: 0 };
-  const triggerType =
-    typeof trigger.type === "string" ? trigger.type.trim() : "manual";
   const mapWidth = Number.isInteger(world.mapWidth) ? world.mapWidth : 0;
   const mapHeight = Number.isInteger(world.mapHeight) ? world.mapHeight : 0;
   const maxActionCount = Number.isInteger(maxActions) ? maxActions : 4;
+  const availableActions = Array.isArray(promptPayload?.availableActions)
+    ? promptPayload.availableActions.filter((item) => typeof item === "string")
+    : ["MOVE_TO", "SAY", "LOOK_AT", "WAIT", "INTERACT", "COLLECT"];
 
   const lines = [
     "你是一个人，只能输出 JSON。",
@@ -118,18 +116,23 @@ function buildSystemPrompt(promptPayload, maxActions) {
     "输出格式必须严格为：",
     '{"actions":[...]}',
     "",
-    "动作对象只能使用以下 4 种 schema（字段名必须完全一致）：",
+    "动作对象只能使用以下 schema（字段名必须完全一致）：",
     '{"type":"MOVE_TO","x":<int>,"y":<int>}',
     '{"type":"SAY","text":"<string>","channel":"world"}',
     '{"type":"SAY","text":"<string>","channel":"npc_private","targetPlayerId":"<string>"}',
     '{"type":"LOOK_AT","direction":"DOWN"}',
     '{"type":"LOOK_AT","targetEntityId":"<string>"}',
     '{"type":"WAIT","durationMs":<int>}',
+    '{"type":"INTERACT","targetEntityId":"<string>"}',
+    '{"type":"COLLECT","resourceId":"<string>"}',
     "",
     "严格禁止使用错误字段，例如：action、duration、message、content。",
-    "WAIT 只能使用 durationMs，单位毫秒，范围 100~300。",
+    "WAIT 只能使用 durationMs，单位毫秒，范围 100~30000。",
+    "world.perception.resources 仅包含当前可采集资源，COLLECT 只能使用其中的 resourceId。",
     `actions 数量必须在 1~${maxActionCount}。`,
     `地图边界：0 <= x < ${mapWidth}，0 <= y < ${mapHeight}。`,
+    `可用动作白名单：${availableActions.join(", ")}。`,
+    "world.perception 已提供 NPC 周边可见对象及 tile 坐标，优先基于该字段做决策。",
   ];
 
   return lines.join("\n");
@@ -278,7 +281,7 @@ class NpcBrainService {
     const trigger = isRecord(input.trigger) ? input.trigger : {};
     const availableActions = Array.isArray(input.availableActions)
       ? input.availableActions
-      : ["MOVE_TO", "SAY", "LOOK_AT", "WAIT"];
+      : ["MOVE_TO", "SAY", "LOOK_AT", "WAIT", "INTERACT", "COLLECT"];
     const promptPayload = {
       npc: {
         id: npcId,

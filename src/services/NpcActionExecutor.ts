@@ -3,6 +3,7 @@ import { Tilemaps } from "phaser";
 import * as CONFIG from "../gameConfig.json";
 import Npc from "../models/Npc";
 import Entity from "../models/Entity";
+import ResourceEntity from "../models/ResourceEntity";
 import {
   NpcAction,
   NpcLookDirection,
@@ -38,7 +39,7 @@ export interface NpcActionExecutionResult {
 }
 
 type PendingActionBuildResult =
-  | { ok: true; value: PendingEntityAction }
+  | { ok: true; value: PendingEntityAction[] }
   | { ok: false; error: NpcActionExecutionError };
 
 export default class NpcActionExecutor {
@@ -72,7 +73,7 @@ export default class NpcActionExecutor {
     }
 
     const validationResult = validateNpcActionList(rawActions);
-    if (!validationResult.ok) {
+    if ("errors" in validationResult) {
       this.applyFallbackWait(npc);
 
       return {
@@ -103,9 +104,9 @@ export default class NpcActionExecutor {
 
     for (let index = 0; index < actions.length; index += 1) {
       const action = actions[index];
-      const buildResult = this.buildPendingAction(npc, action, index);
+      const buildResult = this.buildPendingActions(npc, action, index);
 
-      if (!buildResult.ok) {
+      if ("error" in buildResult) {
         this.applyFallbackWait(npc);
 
         return {
@@ -118,13 +119,15 @@ export default class NpcActionExecutor {
         };
       }
 
-      if (queuedActions === 0) {
-        this.entityActions.processNow(npc, buildResult.value);
-      } else {
-        this.entityActions.enqueue(npc, buildResult.value);
-      }
+      for (const pendingAction of buildResult.value) {
+        if (queuedActions === 0) {
+          this.entityActions.processNow(npc, pendingAction);
+        } else {
+          this.entityActions.enqueue(npc, pendingAction);
+        }
 
-      queuedActions += 1;
+        queuedActions += 1;
+      }
     }
 
     return {
@@ -137,7 +140,7 @@ export default class NpcActionExecutor {
     };
   }
 
-  private buildPendingAction(
+  private buildPendingActions(
     npc: Npc,
     action: NpcAction,
     index: number
@@ -171,27 +174,18 @@ export default class NpcActionExecutor {
 
         return {
           ok: true,
-          value: {
-            type: ActionType.NPC_GO_TO,
-            args: [targetTile],
-            isCompleted: (_queuedAction: EntityAction, unit: Entity) => {
-              const currentTile = unit.getTile();
-              return (
-                !!currentTile &&
-                currentTile.x === targetTile.x &&
-                currentTile.y === targetTile.y
-              );
-            },
-          },
+          value: [this.createGoToAction(targetTile)],
         };
       }
       case "SAY":
         return {
           ok: true,
-          value: {
-            type: ActionType.NPC_SAY,
-            args: [action],
-          },
+          value: [
+            {
+              type: ActionType.NPC_SAY,
+              args: [action],
+            },
+          ],
         };
       case "LOOK_AT": {
         if (action.targetEntityId) {
@@ -210,10 +204,12 @@ export default class NpcActionExecutor {
 
           return {
             ok: true,
-            value: {
-              type: ActionType.NPC_LOOK_AT,
-              args: [{ target }],
-            },
+            value: [
+              {
+                type: ActionType.NPC_LOOK_AT,
+                args: [{ target }],
+              },
+            ],
           };
         }
 
@@ -231,17 +227,80 @@ export default class NpcActionExecutor {
 
         return {
           ok: true,
-          value: {
-            type: ActionType.NPC_LOOK_AT,
-            args: [{ direction: this.mapLookDirection(action.direction) }],
-          },
+          value: [
+            {
+              type: ActionType.NPC_LOOK_AT,
+              args: [{ direction: this.mapLookDirection(action.direction) }],
+            },
+          ],
         };
       }
       case "WAIT":
         return {
           ok: true,
-          value: this.createWaitAction(action.durationMs),
+          value: [this.createWaitAction(action.durationMs)],
         };
+      case "INTERACT": {
+        const target = this.resolveTargetEntity(action.targetEntityId);
+        if (!target) {
+          return {
+            ok: false,
+            error: {
+              code: "INTERACT_TARGET_NOT_FOUND",
+              message: `INTERACT target "${action.targetEntityId}" does not exist.`,
+              actionIndex: index,
+              actionType: action.type,
+            },
+          };
+        }
+
+        return this.buildMoveNearTargetActions(npc, target, index, action.type);
+      }
+      case "COLLECT": {
+        const resource = this.resolveResource(action.resourceId);
+        if (!resource) {
+          return {
+            ok: false,
+            error: {
+              code: "COLLECT_RESOURCE_NOT_FOUND",
+              message: `COLLECT resource "${action.resourceId}" does not exist.`,
+              actionIndex: index,
+              actionType: action.type,
+            },
+          };
+        }
+
+        if (resource.level < CONFIG.RESOURCE_MAX_LEVEL) {
+          return {
+            ok: false,
+            error: {
+              code: "COLLECT_RESOURCE_NOT_READY",
+              message: `COLLECT resource "${action.resourceId}" is not ready (level=${resource.level}).`,
+              actionIndex: index,
+              actionType: action.type,
+            },
+          };
+        }
+
+        const interactionBuild = this.buildMoveNearTargetActions(
+          npc,
+          resource,
+          index,
+          action.type
+        );
+        if (!interactionBuild.ok) return interactionBuild;
+
+        return {
+          ok: true,
+          value: [
+            ...interactionBuild.value,
+            {
+              type: ActionType.RESOURCE_COLLECT,
+              args: [resource],
+            },
+          ],
+        };
+      }
       default:
         return {
           ok: false,
@@ -275,6 +334,66 @@ export default class NpcActionExecutor {
         const elapsed = Date.now() - queuedAction.startedDate;
         return elapsed >= durationMs;
       },
+    };
+  }
+
+  private createGoToAction(targetTile: Tilemaps.Tile): PendingEntityAction {
+    return {
+      type: ActionType.NPC_GO_TO,
+      args: [targetTile],
+      isCompleted: (_queuedAction: EntityAction, unit: Entity) => {
+        const currentTile = unit.getTile();
+        return (
+          !!currentTile &&
+          currentTile.x === targetTile.x &&
+          currentTile.y === targetTile.y
+        );
+      },
+    };
+  }
+
+  private buildMoveNearTargetActions(
+    npc: Npc,
+    target: Entity,
+    index: number,
+    actionType: NpcAction["type"]
+  ): PendingActionBuildResult {
+    const npcPos = new Phaser.Geom.Point(npc.x, npc.y);
+    const tileNextToTarget = target.getNearestFreeTile(npcPos);
+
+    if (!tileNextToTarget) {
+      return {
+        ok: false,
+        error: {
+          code: "TARGET_NEIGHBOR_TILE_NOT_FOUND",
+          message: `Target "${target.id}" has no nearby walkable tile.`,
+          actionIndex: index,
+          actionType,
+        },
+      };
+    }
+
+    if (!this.canReachTile(npc, tileNextToTarget)) {
+      return {
+        ok: false,
+        error: {
+          code: "TARGET_UNREACHABLE",
+          message: `Target "${target.id}" is unreachable.`,
+          actionIndex: index,
+          actionType,
+        },
+      };
+    }
+
+    return {
+      ok: true,
+      value: [
+        this.createGoToAction(tileNextToTarget),
+        {
+          type: ActionType.NPC_LOOK_AT,
+          args: [{ target }],
+        },
+      ],
     };
   }
 
@@ -318,7 +437,24 @@ export default class NpcActionExecutor {
       return this.scene.npcs[normalizedId];
     }
 
+    const resource = this.resolveResource(normalizedId);
+    if (resource) return resource;
+
     return null;
+  }
+
+  private resolveResource(resourceId: string): ResourceEntity | null {
+    const normalizedId = resourceId.trim();
+    if (!normalizedId) return null;
+
+    if (this.scene.resources[normalizedId]) {
+      return this.scene.resources[normalizedId];
+    }
+
+    const matchedByResourceId = Object.values(this.scene.resources).find(
+      (resource) => String(resource.resourceId) === normalizedId
+    );
+    return matchedByResourceId || null;
   }
 
   private mapLookDirection(direction: NpcLookDirection): Position {

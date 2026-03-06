@@ -1,7 +1,14 @@
 const SYSTEM_NPC_OWNER = "__system__";
 
 const NPC_GENDERS = new Set(["male", "female", "non_binary", "unknown"]);
-const NPC_ACTION_TYPES = new Set(["MOVE_TO", "SAY", "LOOK_AT", "WAIT"]);
+const NPC_ACTION_TYPES = new Set([
+  "MOVE_TO",
+  "SAY",
+  "LOOK_AT",
+  "WAIT",
+  "INTERACT",
+  "COLLECT",
+]);
 const LOOK_DIRECTIONS = new Set(["UP", "DOWN", "LEFT", "RIGHT"]);
 const CHAT_CHANNELS = new Set(["world", "npc_private"]);
 
@@ -30,6 +37,14 @@ function normalizeId(value) {
   if (!normalized) return "";
   if (!/^[A-Za-z0-9._:-]+$/.test(normalized)) return "";
   return normalized;
+}
+
+function normalizeReferenceId(value) {
+  if (typeof value === "number" && Number.isInteger(value)) {
+    return normalizeId(String(value));
+  }
+
+  return normalizeId(value);
 }
 
 function isValidTileCoordinate(x, y, mapWidth, mapHeight) {
@@ -154,6 +169,10 @@ function validateNpcActionList(actions, context = {}) {
   const mapHeight = Number.isInteger(context.mapHeight) ? context.mapHeight : 0;
   const players = isRecord(context.players) ? context.players : {};
   const npcs = isRecord(context.npcs) ? context.npcs : {};
+  const resources = isRecord(context.resources) ? context.resources : {};
+  const resourceMaxLevel = Number.isInteger(context.resourceMaxLevel)
+    ? context.resourceMaxLevel
+    : 4;
   const maxSayLength = Number.isInteger(context.maxSayLength)
     ? context.maxSayLength
     : 200;
@@ -279,15 +298,21 @@ function validateNpcActionList(actions, context = {}) {
       }
 
       if (hasTarget) {
-        const targetEntityId = normalizeId(action.targetEntityId);
-        if (!targetEntityId || (!players[targetEntityId] && !npcs[targetEntityId])) {
+        const targetEntityId = normalizeReferenceId(action.targetEntityId);
+        if (
+          !targetEntityId ||
+          (!players[targetEntityId] &&
+            !npcs[targetEntityId] &&
+            !resources[targetEntityId])
+        ) {
           return {
             ok: false,
             reason: "INVALID_LOOK_TARGET",
             details: {
               actionIndex: i,
               field: `actions[${i}].targetEntityId`,
-              message: "LOOK_AT targetEntityId must be an existing player or NPC id.",
+              message:
+                "LOOK_AT targetEntityId must be an existing player, NPC or resource id.",
             },
           };
         }
@@ -314,6 +339,70 @@ function validateNpcActionList(actions, context = {}) {
       normalizedActions.push({
         type: "LOOK_AT",
         direction: action.direction,
+      });
+      continue;
+    }
+
+    if (action.type === "INTERACT") {
+      const targetEntityId = normalizeReferenceId(action.targetEntityId);
+      if (
+        !targetEntityId ||
+        (!players[targetEntityId] &&
+          !npcs[targetEntityId] &&
+          !resources[targetEntityId])
+      ) {
+        return {
+          ok: false,
+          reason: "INVALID_INTERACT_TARGET",
+          details: {
+            actionIndex: i,
+            field: `actions[${i}].targetEntityId`,
+            message:
+              "INTERACT targetEntityId must be an existing player, NPC or resource id.",
+          },
+        };
+      }
+
+      normalizedActions.push({
+        type: "INTERACT",
+        targetEntityId,
+      });
+      continue;
+    }
+
+    if (action.type === "COLLECT") {
+      const resourceId = normalizeReferenceId(action.resourceId);
+      const resource = resourceId ? resources[resourceId] : null;
+      if (!resourceId || !resource) {
+        return {
+          ok: false,
+          reason: "INVALID_COLLECT_RESOURCE",
+          details: {
+            actionIndex: i,
+            field: `actions[${i}].resourceId`,
+            message: "COLLECT resourceId must be an existing resource id.",
+          },
+        };
+      }
+
+      if (
+        !Number.isInteger(resource.level) ||
+        resource.level < resourceMaxLevel
+      ) {
+        return {
+          ok: false,
+          reason: "COLLECT_RESOURCE_NOT_READY",
+          details: {
+            actionIndex: i,
+            field: `actions[${i}].resourceId`,
+            message: `COLLECT resource is not ready. required level=${resourceMaxLevel}.`,
+          },
+        };
+      }
+
+      normalizedActions.push({
+        type: "COLLECT",
+        resourceId,
       });
       continue;
     }

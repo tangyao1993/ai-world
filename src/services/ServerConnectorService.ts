@@ -13,6 +13,7 @@ import OtherPlayer from "../models/OtherPlayer";
 import ResourceEntity from "../models/ResourceEntity";
 import { NpcCreateRequest, NpcSnapshot } from "../types/Npc";
 import { NpcActionExecutionResult } from "./NpcActionExecutor";
+import CONFIG from "../gameConfig.json";
 
 type NpcActionExecutionMeta = {
   executionId?: string;
@@ -20,10 +21,18 @@ type NpcActionExecutionMeta = {
   decisionAt?: number;
 };
 
+type NpcExecutionNpcState = {
+  tile?: {
+    x: number;
+    y: number;
+  };
+};
+
 export default class ServerConnectorService implements EventListener {
   server: any;
   world: WorldScene;
   emitter: EventDispatcher;
+  npcExecutionOwnerByNpc: { [key: string]: string } = {};
 
   constructor(server: any, world: WorldScene, eventEmitter: EventDispatcher) {
     this.server = server;
@@ -40,6 +49,19 @@ export default class ServerConnectorService implements EventListener {
     this.emitter.on(
       ActionType.CHAT_SEND_MESSAGE,
       (chatmessage: ChatMessage) => {
+        const localSocketId = this.world.player?.id;
+        const npcId =
+          typeof chatmessage.npcId === "string" ? chatmessage.npcId.trim() : "";
+        if (npcId) {
+          const ownerSocketId =
+            typeof this.npcExecutionOwnerByNpc[npcId] === "string"
+              ? this.npcExecutionOwnerByNpc[npcId]
+              : "";
+          if (ownerSocketId && localSocketId && ownerSocketId !== localSocketId) {
+            return;
+          }
+        }
+
         this.server.emit("chat.sendNewMessage", {
           ...chatmessage,
           channel: chatmessage.channel || "world",
@@ -69,7 +91,22 @@ export default class ServerConnectorService implements EventListener {
     );
     this.emitter.on(
       ActionType.RESOURCE_COLLECT,
-      (_player: Player, resource: ResourceEntity) => {
+      (unit: Player, resource: ResourceEntity) => {
+        if (resource.level < CONFIG.RESOURCE_MAX_LEVEL) return;
+
+        const localSocketId = this.world.player?.id;
+        const unitId = typeof unit?.id === "string" ? unit.id.trim() : "";
+        if (!localSocketId || !unitId) return;
+
+        const isLocalPlayer = unitId === localSocketId;
+        if (!isLocalPlayer) {
+          const ownerSocketId =
+            typeof this.npcExecutionOwnerByNpc[unitId] === "string"
+              ? this.npcExecutionOwnerByNpc[unitId]
+              : "";
+          if (!ownerSocketId || ownerSocketId !== localSocketId) return;
+        }
+
         this.server.emit("resource.collect", resource.resourceId);
       }
     );
@@ -189,6 +226,12 @@ export default class ServerConnectorService implements EventListener {
     this.server.on(
       "npc.executeActions",
       (npcId: string, actions: unknown, meta?: NpcActionExecutionMeta) => {
+        const normalizedNpcId = typeof npcId === "string" ? npcId.trim() : "";
+        if (normalizedNpcId) {
+          this.npcExecutionOwnerByNpc[normalizedNpcId] =
+            typeof meta?.ownerSocketId === "string" ? meta.ownerSocketId.trim() : "";
+        }
+
         const result = this.world.executeNpcActions(npcId, actions);
         if (!result.ok) {
           console.warn("[NpcActionExecutor] npc.executeActions failed:", result);
@@ -211,6 +254,11 @@ export default class ServerConnectorService implements EventListener {
     });
 
     this.server.on("npc.removed", (npcId: string) => {
+      const normalizedNpcId = typeof npcId === "string" ? npcId.trim() : "";
+      if (normalizedNpcId) {
+        delete this.npcExecutionOwnerByNpc[normalizedNpcId];
+      }
+
       this.world.removeNpc(npcId);
     });
   }
@@ -228,12 +276,22 @@ export default class ServerConnectorService implements EventListener {
       typeof meta?.ownerSocketId === "string" ? meta.ownerSocketId.trim() : "";
     const localSocketId = this.world.player?.id;
     if (ownerSocketId && localSocketId !== ownerSocketId) return;
+    const npcState: NpcExecutionNpcState = {};
+    const npc = this.world.npcs[npcId];
+    const npcTile = npc?.getTile?.();
+    if (npcTile && Number.isInteger(npcTile.x) && Number.isInteger(npcTile.y)) {
+      npcState.tile = {
+        x: npcTile.x,
+        y: npcTile.y,
+      };
+    }
 
     this.server.emit("npc.executionResult", {
       executionId,
       npcId,
       clientFinishedAt: Date.now(),
       decisionAt: meta?.decisionAt,
+      npcState,
       result: {
         ok: result.ok,
         acceptedActions: result.acceptedActions,

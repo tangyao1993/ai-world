@@ -7,6 +7,7 @@ import ResourceEntity from '../models/ResourceEntity';
 import { SayAction } from '../npc/NpcActionProtocol';
 import { Position } from '../types/Positions';
 import { ActionType, ServerEvent } from '../types/Actions';
+import CONFIG from "../gameConfig.json";
 
 type NpcLookPayload = {
   target?: Entity;
@@ -58,6 +59,8 @@ export default class EntityActionProcessor implements EventListener {
       });
 
       this.emitter.on(ActionType.RESOURCE_COLLECT, (unit: Entity & HasInventory, object: ResourceEntity) => {
+        if (object.level < CONFIG.RESOURCE_MAX_LEVEL) return;
+
         // Look at object
         unit.lookAt(object);
 

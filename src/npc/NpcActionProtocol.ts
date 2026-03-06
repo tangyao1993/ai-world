@@ -3,6 +3,8 @@ export const NPC_ACTION_WHITELIST = [
   "SAY",
   "LOOK_AT",
   "WAIT",
+  "INTERACT",
+  "COLLECT",
 ] as const;
 
 export type NpcActionType = (typeof NPC_ACTION_WHITELIST)[number];
@@ -34,7 +36,23 @@ export interface WaitAction {
   durationMs: number;
 }
 
-export type NpcAction = MoveToAction | SayAction | LookAtAction | WaitAction;
+export interface InteractAction {
+  type: "INTERACT";
+  targetEntityId: string;
+}
+
+export interface CollectAction {
+  type: "COLLECT";
+  resourceId: string;
+}
+
+export type NpcAction =
+  | MoveToAction
+  | SayAction
+  | LookAtAction
+  | WaitAction
+  | InteractAction
+  | CollectAction;
 
 export interface ValidationIssue {
   code: string;
@@ -93,7 +111,7 @@ export function validateNpcAction(action: unknown): ValidationResult<NpcAction> 
           code: "ACTION_NOT_ALLOWED",
           field: "type",
           message:
-            "Action type is not in whitelist. Allowed: MOVE_TO, SAY, LOOK_AT, WAIT.",
+            "Action type is not in whitelist. Allowed: MOVE_TO, SAY, LOOK_AT, WAIT, INTERACT, COLLECT.",
         },
       ],
     };
@@ -317,6 +335,81 @@ export function validateNpcAction(action: unknown): ValidationResult<NpcAction> 
           durationMs: action.durationMs,
         },
       };
+    case "INTERACT": {
+      if (typeof action.targetEntityId !== "string") {
+        return {
+          ok: false,
+          errors: [
+            {
+              code: "INVALID_ARG",
+              field: "targetEntityId",
+              message: "targetEntityId must be a string.",
+            },
+          ],
+        };
+      }
+
+      const targetEntityId = action.targetEntityId.trim();
+      if (targetEntityId.length < 1 || targetEntityId.length > MAX_ID_LENGTH) {
+        return {
+          ok: false,
+          errors: [
+            {
+              code: "INVALID_ARG",
+              field: "targetEntityId",
+              message: `targetEntityId length must be in [1, ${MAX_ID_LENGTH}].`,
+            },
+          ],
+        };
+      }
+
+      return {
+        ok: true,
+        value: {
+          type: "INTERACT",
+          targetEntityId,
+        },
+      };
+    }
+    case "COLLECT": {
+      if (
+        typeof action.resourceId !== "string" &&
+        typeof action.resourceId !== "number"
+      ) {
+        return {
+          ok: false,
+          errors: [
+            {
+              code: "INVALID_ARG",
+              field: "resourceId",
+              message: "resourceId must be a string or number.",
+            },
+          ],
+        };
+      }
+
+      const resourceId = String(action.resourceId).trim();
+      if (resourceId.length < 1 || resourceId.length > MAX_ID_LENGTH) {
+        return {
+          ok: false,
+          errors: [
+            {
+              code: "INVALID_ARG",
+              field: "resourceId",
+              message: `resourceId length must be in [1, ${MAX_ID_LENGTH}].`,
+            },
+          ],
+        };
+      }
+
+      return {
+        ok: true,
+        value: {
+          type: "COLLECT",
+          resourceId,
+        },
+      };
+    }
     default:
       return {
         ok: false,
@@ -350,20 +443,21 @@ export function validateNpcActionList(
   const validActions: NpcAction[] = [];
   const errors: ValidationIssue[] = [];
 
-  actions.forEach((action, index) => {
+  for (let index = 0; index < actions.length; index += 1) {
+    const action = actions[index];
     const result = validateNpcAction(action);
-    if (result.ok) {
-      validActions.push(result.value);
-      return;
+    if ("errors" in result) {
+      result.errors.forEach((err) => {
+        errors.push({
+          ...err,
+          field: `actions[${index}].${err.field}`,
+        });
+      });
+      continue;
     }
 
-    result.errors.forEach((err) => {
-      errors.push({
-        ...err,
-        field: `actions[${index}].${err.field}`,
-      });
-    });
-  });
+    validActions.push(result.value);
+  }
 
   if (errors.length > 0) {
     return { ok: false, errors };
