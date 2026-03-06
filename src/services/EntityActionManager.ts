@@ -75,36 +75,47 @@ export default class EntityActionManager {
     }
 
     update = () => {
-        for (let entityId in this.actionsQueue) {
-            const entityActions = this.actionsQueue[entityId];
+        try {
+            for (let entityId in this.actionsQueue) {
+                const entity = this.entities[entityId];
+                const entityActions = this.actionsQueue[entityId];
 
-            // If no pending action for this entity, continue
-            // @TODO Remove entity from actionsQueue list if empty
-            if (entityActions.length <= 0) {
-                continue;
-            }
-
-            const nextAction = entityActions[0];
-
-            // Wait until current action is completed
-            if (nextAction.status === ActionStatus.RUNNING) {
-                if (nextAction.progress && typeof nextAction.progress === 'function') {
-                    const progress = nextAction.progress(nextAction, this.entities[entityId]);
-                    this.emitter.emit(ActionType.ACTION_PROGRESS, this.entities[entityId], progress, ...nextAction.args);
+                if (!entity || !Array.isArray(entityActions) || entityActions.length <= 0) {
+                    continue;
                 }
 
-                if (nextAction.isCompleted && nextAction.isCompleted(nextAction, this.entities[entityId])) {
+                const nextAction = entityActions[0];
+                if (!nextAction) continue;
+
+                try {
+                    // Wait until current action is completed
+                    if (nextAction.status === ActionStatus.RUNNING) {
+                        if (nextAction.progress && typeof nextAction.progress === 'function') {
+                            const progress = nextAction.progress(nextAction, entity);
+                            this.emitter.emit(ActionType.ACTION_PROGRESS, entity, progress, ...nextAction.args);
+                        }
+
+                        if (nextAction.isCompleted && nextAction.isCompleted(nextAction, entity)) {
+                            entityActions.shift();
+                        }
+
+                        continue;
+                    }
+
+                    // If no action running, process first action in the queue
+                    this._processAction(entity, nextAction);
+                } catch (error) {
+                    console.error("[EntityActionManager] action processing failed", {
+                        entityId,
+                        actionType: nextAction.type,
+                        message: String(error),
+                    });
                     entityActions.shift();
                 }
-
-                continue;
             }
-            
-            // If no action running, process first action in the queue
-            this._processAction(this.entities[entityId], entityActions[0]);
+        } finally {
+            setTimeout(this.update, this.THICK_TIMER);
         }
-
-        setTimeout(this.update, this.THICK_TIMER);
     }
 
     private _processAction(entity: Entity, action: EntityAction) {

@@ -14,6 +14,12 @@ type NpcLookPayload = {
   direction?: Position;
 };
 
+function canAddInventory(
+  inventory: unknown
+): inventory is { add: (item: InventoryItem) => void } {
+  return !!inventory && typeof (inventory as { add?: unknown }).add === "function";
+}
+
 export default class EntityActionProcessor implements EventListener {
     emitter = EventDispatcher.getInstance();
 
@@ -64,7 +70,7 @@ export default class EntityActionProcessor implements EventListener {
         // Look at object
         unit.lookAt(object);
 
-        if (unit.inventory) {
+        if (canAddInventory(unit.inventory)) {
           // Create inventory's item and add it to unit's inventory
           const itemInventory = new InventoryItem(object.item, object.itemQuantity);
           unit.inventory.add(itemInventory);

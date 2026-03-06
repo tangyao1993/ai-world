@@ -149,6 +149,16 @@ export default class ServerConnectorService implements EventListener {
         const unitId = typeof unit?.id === "string" ? unit.id.trim() : "";
         if (!localSocketId || !unitId) return;
 
+        const normalizedResourceId =
+          (typeof resource?.resourceId === "string" ||
+            typeof resource?.resourceId === "number") &&
+          String(resource.resourceId).trim()
+            ? String(resource.resourceId).trim()
+            : typeof resource?.id === "string" && resource.id.trim()
+              ? resource.id.trim()
+              : "";
+        if (!normalizedResourceId) return;
+
         const isLocalPlayer = unitId === localSocketId;
         if (!isLocalPlayer) {
           const ownerSocketId =
@@ -159,7 +169,7 @@ export default class ServerConnectorService implements EventListener {
         }
 
         this.server.emit("resource.collect", {
-          resourceId: resource.resourceId,
+          resourceId: normalizedResourceId,
           collectorEntityId: unitId,
         });
       }
@@ -196,6 +206,13 @@ export default class ServerConnectorService implements EventListener {
     this.server.on("currentResources", (resources: any) => {
       // Create Resources from data map
       Object.values(resources).forEach((object: any) => {
+        const resourceId =
+          (typeof object?.id === "string" || typeof object?.id === "number") &&
+          String(object.id).trim()
+            ? String(object.id).trim()
+            : "";
+        if (!resourceId) return;
+
         const tile = this.world.map.getTileAtWorldXY(
           object.x,
           object.y,
@@ -210,9 +227,9 @@ export default class ServerConnectorService implements EventListener {
           object.type
         );
         resource.grow(object.level);
-        resource.resourceId = object.id;
+        resource.resourceId = resourceId;
 
-        this.world.resources[object.id] = resource;
+        this.world.resources[resourceId] = resource;
       });
     });
 
@@ -269,8 +286,15 @@ export default class ServerConnectorService implements EventListener {
     });
 
     // # Resource/grown
-    this.server.on("resource.grown", (resourceId: string, newLevel: number) => {
-      const resource = this.world.resources[resourceId];
+    this.server.on("resource.grown", (resourceId: string | number, newLevel: number) => {
+      const normalizedResourceId =
+        (typeof resourceId === "string" || typeof resourceId === "number") &&
+        String(resourceId).trim()
+          ? String(resourceId).trim()
+          : "";
+      if (!normalizedResourceId) return;
+
+      const resource = this.world.resources[normalizedResourceId];
       if (!resource) return;
 
       resource.grow(newLevel);

@@ -10,6 +10,7 @@ const DEFAULT_MAX_ACTIONS = 4;
 const DEFAULT_TIMEOUT_MS = 12000;
 const DEFAULT_MAX_CONTEXT_LENGTH = 240;
 const DEFAULT_MAX_OUTPUT_TOKENS = 280;
+const DEFAULT_LLM_TEMPERATURE = 0.7;
 
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -17,6 +18,11 @@ function isRecord(value) {
 
 function clampInteger(value, min, max, fallback) {
   if (!Number.isInteger(value)) return fallback;
+  return Math.max(min, Math.min(max, value));
+}
+
+function clampNumber(value, min, max, fallback) {
+  if (typeof value !== "number" || Number.isNaN(value)) return fallback;
   return Math.max(min, Math.min(max, value));
 }
 
@@ -105,6 +111,18 @@ function buildSystemPrompt(promptPayload, maxActions) {
   const mapWidth = Number.isInteger(world.mapWidth) ? world.mapWidth : 0;
   const mapHeight = Number.isInteger(world.mapHeight) ? world.mapHeight : 0;
   const maxActionCount = Number.isInteger(maxActions) ? maxActions : 4;
+  const npc = isRecord(promptPayload?.npc) ? promptPayload.npc : {};
+  const soul = trimString(npc.soul, 300);
+  const memorySummary = trimString(npc.memorySummary, 500);
+  const personaTags = Array.isArray(npc.personaTags)
+    ? npc.personaTags
+        .filter((item) => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .slice(0, 10)
+    : [];
+  const personaHint = soul || "未提供";
+  const memoryHint = memorySummary || "未提供";
   const availableActions = Array.isArray(promptPayload?.availableActions)
     ? promptPayload.availableActions.filter((item) => typeof item === "string")
     : [
@@ -120,17 +138,19 @@ function buildSystemPrompt(promptPayload, maxActions) {
       ];
 
   const lines = [
-    "你是一个人，只能输出 JSON。",
-    "绝对不要输出 markdown、解释、注释、额外文本。",
+    "你是一个具有人类化动机和自主意识的 NPC。",
+    "你必须只输出 JSON，绝对不要输出 markdown、解释、注释、额外文本。",
     "",
+    "你要先思考再行动：先输出 thought，再输出 actions。",
     "输出格式必须严格为：",
-    '{"actions":[...]}',
+    '{"thought":"<string>","actions":[...]}',
+    "thought 必须是第一人称、结合当前环境的人类化内心想法，长度不超过 50 个字。",
     "",
     "动作对象只能使用以下 schema（字段名必须完全一致）：",
     '{"type":"MOVE_TO","x":<int>,"y":<int>}',
     '{"type":"SAY","text":"<string>","channel":"world"}',
     '{"type":"SAY","text":"<string>","channel":"npc_private","targetPlayerId":"<string>"}',
-    '{"type":"LOOK_AT","direction":"DOWN"}',
+    '{"type":"LOOK_AT","direction":"UP|DOWN|LEFT|RIGHT"}',
     '{"type":"LOOK_AT","targetEntityId":"<string>"}',
     '{"type":"WAIT","durationMs":<int>}',
     '{"type":"INTERACT","targetEntityId":"<string>"}',
@@ -139,16 +159,28 @@ function buildSystemPrompt(promptPayload, maxActions) {
     '{"type":"GIFT_TO_NPC","targetNpcId":"<string>","itemId":"<string>","quantity":<int>}',
     '{"type":"ATTACK_NPC","targetNpcId":"<string>"}',
     "",
+    "行为准则：",
+    "优先决策顺序：可采集资源 > 可见玩家/NPC 互动 > 探索巡游。",
+    "当 perception 里没有玩家、NPC、资源时，不要停机；应执行探索类动作（MOVE_TO/LOOK_AT/SAY/WAIT）。",
+    "当 trigger.type=spawn 时，优先做符合“刚进入世界”的自然反应。",
+    "world.recentWorldChatMessages 提供了世界聊天窗最近消息，可用于理解当前社交语境。",
+    "world.recentCombatEvents 提供了最近攻击/击倒/复活记录，可用于规避重复无效攻击并进行战斗决策。",
+    "",
     "严格禁止使用错误字段，例如：action、duration、message、content。",
     "WAIT 只能使用 durationMs，单位毫秒，范围 100~30000。",
     "world.perception.resources 仅包含当前可采集资源，COLLECT 只能使用其中的 resourceId。",
     "TALK_TO_NPC/GIFT_TO_NPC/ATTACK_NPC 的 targetNpcId 只能来自 world.perception.npcs。",
-    "GIFT_TO_NPC 的 itemId 只能使用 npc.inventory 中数量大于 0 的物品。",
-    "ATTACK_NPC 前先判断 target 是否存活（alive=true），并避免连续攻击同一目标。",
-    `actions 数量必须在 1~${maxActionCount}。`,
+    "GIFT_TO_NPC 的 itemId 只能使用 world.perception.self.inventory 中数量大于 0 的物品。",
+    "ATTACK_NPC 前先判断 target 是否存活（alive=true）。",
+    `actions 数量必须在 1~${maxActionCount}，不能为空。`,
     `地图边界：0 <= x < ${mapWidth}，0 <= y < ${mapHeight}。`,
+    "MOVE_TO 的目标坐标必须是整数，并优先位于 world.perception.window 范围内。",
     `可用动作白名单：${availableActions.join(", ")}。`,
     "world.perception 已提供 NPC 周边可见对象及 tile 坐标，优先基于该字段做决策。",
+    "",
+    `当前人设标签：${personaTags.length > 0 ? personaTags.join(", ") : "无"}`,
+    `当前灵魂设定：${personaHint}`,
+    `当前记忆摘要：${memoryHint}`,
   ];
 
   return lines.join("\n");
@@ -241,10 +273,14 @@ class NpcBrainService {
       options.apiKey || process.env.NPC_BRAIN_API_KEY || DEFAULT_LLM_API_KEY,
       300
     );
-    this.temperature =
+    this.temperature = clampNumber(
       typeof options.temperature === "number"
         ? options.temperature
-        : Number(process.env.NPC_BRAIN_TEMPERATURE || 0.3);
+        : Number(process.env.NPC_BRAIN_TEMPERATURE || 2),
+      0,
+      1.2,
+      DEFAULT_LLM_TEMPERATURE
+    );
     this.timeoutMs = clampInteger(
       Number(options.timeoutMs || process.env.NPC_BRAIN_TIMEOUT_MS),
       1000,
@@ -335,8 +371,8 @@ class NpcBrainService {
       availableActions,
       maxActions: this.maxActions,
       outputContract: {
-        format: '{ "actions": [ ... ] }',
-        note: "only output whitelisted actions",
+        format: '{ "thought": "...", "actions": [ ... ] }',
+        note: "only output whitelisted actions with human-like intent in thought",
       },
     };
 

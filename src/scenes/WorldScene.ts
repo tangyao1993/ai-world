@@ -148,7 +148,7 @@ export default class WorldScene extends Phaser.Scene {
     const existingNpc = this.npcs[normalizedSnapshot.id];
 
     if (existingNpc) {
-      existingNpc.applySnapshot(normalizedSnapshot);
+      existingNpc.applySnapshot(normalizedSnapshot, { syncPosition: false });
       return existingNpc;
     }
 

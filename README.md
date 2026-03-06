@@ -64,6 +64,7 @@ export NPC_BRAIN_PROVIDER=ollama
 export NPC_BRAIN_API_KEY=
 export NPC_BRAIN_MODEL=qwen3-coder:latest
 export NPC_BRAIN_ENDPOINT=http://localhost:11434/v1/chat/completions
+export NPC_BRAIN_TEMPERATURE=0.7
 export NPC_BRAIN_TIMEOUT_MS=12000
 export NPC_BRAIN_MAX_OUTPUT_TOKENS=280
 export NPC_BRAIN_MAX_ACTIONS=4

@@ -10,7 +10,8 @@
 - 默认行为：
   - 默认使用 Ollama（`provider=ollama`，`endpoint=http://localhost:11434/v1/chat/completions`）
   - 当配置了 `NPC_BRAIN_PROVIDER` + `NPC_BRAIN_API_KEY` 时，调用对应 chat completions 接口
-- 输出格式：`{ "actions": [ ... ] }`
+- 输出格式：`{ "thought": "...", "actions": [ ... ] }`
+- `thought` 用于表达当前内在动机（第一人称，短文本），`actions` 仍是唯一执行来源
 - 动作会经过 `validateNpcActionList` 二次校验；无效输出自动降级为 `WAIT`
 - 每次调用会输出原始请求/响应日志：
   - `[NpcBrain][LLMRequestRaw][traceId] ...`
@@ -25,6 +26,7 @@
 - `NPC_BRAIN_TIMEOUT_MS`：请求超时（毫秒）
 - `NPC_BRAIN_MAX_OUTPUT_TOKENS`：模型输出 token 上限
 - `NPC_BRAIN_MAX_ACTIONS`：单次动作计划上限
+- `NPC_BRAIN_TEMPERATURE`：采样温度（默认 `0.7`，建议 `0.6~0.8`）
 - `NPC_BRAIN_AUTONOMOUS_INTERVAL_MS`：NPC 自动思考间隔（毫秒，默认 6000）
 - `NPC_BRAIN_AUTONOMOUS_TICK_MS`：自动思考调度 tick（毫秒，默认 1000）
 
@@ -50,6 +52,6 @@
 ## 验收映射
 
 - 模型输出可被解析并执行：
-  - 决策输出统一解析为 `actions`，并进入 `npc.executeActions` 执行链路
+  - 决策输出统一解析为 `actions`，并进入 `npc.executeActions` 执行链路（`thought` 不参与动作校验）
 - 无效输出可降级为 `WAIT`：
   - 任意解析失败/校验失败/请求失败，统一回退为 `WAIT`

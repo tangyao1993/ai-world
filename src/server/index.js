@@ -42,14 +42,17 @@ const NPC_PERCEPTION_WINDOW_WIDTH_TILES = 24;
 const NPC_PERCEPTION_WINDOW_HEIGHT_TILES = 14;
 const OBSERVER_MODE_ENABLED =
   String(process.env.WORLD_GOD_VIEW_MODE || "true").toLowerCase() !== "false";
-const NPC_MAX_HP = 100;
+const NPC_MAX_HP = 3;
 const NPC_ATTACK_DAMAGE = 1;
-const NPC_ATTACK_COOLDOWN_MS = 1200;
 const NPC_REVIVE_DELAY_MS = 5000;
 const NPC_MAX_INVENTORY_ITEM_QUANTITY = 999;
 const NPC_AFFINITY_MAX = 100;
 const MAX_WORLD_EVENT_LENGTH = 240;
 const MAX_WORLD_EVENTS = 20;
+const MAX_COMBAT_HISTORY = 120;
+const MAX_BRAIN_WORLD_CHAT_CONTEXT = 15;
+const MAX_BRAIN_COMBAT_CONTEXT = 15;
+const MAX_BRAIN_CHAT_MESSAGE_LENGTH = 120;
 
 const rateLimiter = createRateLimiter();
 const npcBrainService = new NpcBrainService();
@@ -144,6 +147,102 @@ function buildNpcActionValidationContext(stateRef, actorNpcId = "") {
   };
 }
 
+function buildBrainWorldChatContext(chatMessages) {
+  if (!Array.isArray(chatMessages)) return [];
+
+  return chatMessages
+    .slice(-MAX_BRAIN_WORLD_CHAT_CONTEXT)
+    .map((message) => {
+      if (!isRecord(message)) return null;
+
+      const text = normalizeChatMessage(message.message).slice(
+        0,
+        MAX_BRAIN_CHAT_MESSAGE_LENGTH
+      );
+      if (!text) return null;
+
+      const author =
+        typeof message.author === "string" && message.author.trim()
+          ? message.author.trim().slice(0, 64)
+          : "Unknown";
+      const entry = {
+        author,
+        message: text,
+        channel: "world",
+      };
+
+      if (typeof message.npcId === "string" && message.npcId.trim()) {
+        entry.npcId = message.npcId.trim().slice(0, 64);
+      }
+      if (typeof message.npcName === "string" && message.npcName.trim()) {
+        entry.npcName = message.npcName.trim().slice(0, 64);
+      }
+      if (Number.isInteger(message.creationDate)) {
+        entry.creationDate = message.creationDate;
+      }
+
+      return entry;
+    })
+    .filter(Boolean);
+}
+
+function buildBrainCombatContext(combatEvents) {
+  if (!Array.isArray(combatEvents)) return [];
+
+  return combatEvents
+    .slice(-MAX_BRAIN_COMBAT_CONTEXT)
+    .map((event) => {
+      if (!isRecord(event)) return null;
+
+      const type =
+        typeof event.type === "string" && event.type.trim()
+          ? event.type.trim().slice(0, 32)
+          : "";
+      if (!type) return null;
+
+      const entry = { type };
+      if (Number.isInteger(event.createdAt)) {
+        entry.createdAt = event.createdAt;
+      }
+      if (typeof event.attackerNpcId === "string" && event.attackerNpcId.trim()) {
+        entry.attackerNpcId = event.attackerNpcId.trim().slice(0, 64);
+      }
+      if (typeof event.attackerNpcName === "string" && event.attackerNpcName.trim()) {
+        entry.attackerNpcName = event.attackerNpcName.trim().slice(0, 64);
+      }
+      if (typeof event.targetNpcId === "string" && event.targetNpcId.trim()) {
+        entry.targetNpcId = event.targetNpcId.trim().slice(0, 64);
+      }
+      if (typeof event.targetNpcName === "string" && event.targetNpcName.trim()) {
+        entry.targetNpcName = event.targetNpcName.trim().slice(0, 64);
+      }
+      if (Number.isInteger(event.damage)) {
+        entry.damage = event.damage;
+      }
+      if (Number.isInteger(event.targetHp)) {
+        entry.targetHp = event.targetHp;
+      }
+      if (Number.isInteger(event.targetMaxHp)) {
+        entry.targetMaxHp = event.targetMaxHp;
+      }
+      if (typeof event.targetAlive === "boolean") {
+        entry.targetAlive = event.targetAlive;
+      }
+      if (typeof event.npcId === "string" && event.npcId.trim()) {
+        entry.npcId = event.npcId.trim().slice(0, 64);
+      }
+      if (typeof event.npcName === "string" && event.npcName.trim()) {
+        entry.npcName = event.npcName.trim().slice(0, 64);
+      }
+      if (Number.isInteger(event.hp)) {
+        entry.hp = event.hp;
+      }
+
+      return entry;
+    })
+    .filter(Boolean);
+}
+
 function buildNpcWorldContext(stateRef, npc) {
   const runtimeNpc = ensureNpcRuntimeState(npc) || {
     hp: NPC_MAX_HP,
@@ -161,6 +260,8 @@ function buildNpcWorldContext(stateRef, npc) {
     recentWorldEvents: Array.isArray(stateRef.worldEvents)
       ? stateRef.worldEvents.slice(-5)
       : [],
+    recentWorldChatMessages: buildBrainWorldChatContext(stateRef.chatMessages),
+    recentCombatEvents: buildBrainCombatContext(stateRef.combatEvents),
     selfStatus: {
       hp: runtimeNpc.hp,
       alive: runtimeNpc.alive,
@@ -319,6 +420,17 @@ function appendWorldChatMessage(message) {
   if (state.chatMessages.length > MAX_CHAT_HISTORY) {
     state.chatMessages = state.chatMessages.slice(
       state.chatMessages.length - MAX_CHAT_HISTORY
+    );
+  }
+}
+
+function appendCombatEvent(event) {
+  if (!isRecord(event)) return;
+
+  state.combatEvents.push(event);
+  if (state.combatEvents.length > MAX_COMBAT_HISTORY) {
+    state.combatEvents = state.combatEvents.slice(
+      state.combatEvents.length - MAX_COMBAT_HISTORY
     );
   }
 }
@@ -842,6 +954,7 @@ const state = {
   npcs: {},
   npcOwners: {},
   chatMessages: [],
+  combatEvents: [],
   worldEvents: [],
   resources: worldData.layers[4].objects.reduce(
     (resources, resourceData) => ({
@@ -1025,6 +1138,15 @@ function tryReviveDeadNpcs() {
     runtimeNpc.deadUntil = 0;
     runtimeNpc.combatCooldownUntil = 0;
 
+    appendCombatEvent({
+      id: `combat-${now}-${Math.random().toString(36).slice(2, 8)}`,
+      type: "npc_revived",
+      createdAt: now,
+      npcId: runtimeNpc.id,
+      npcName: runtimeNpc.name,
+      hp: runtimeNpc.hp,
+    });
+
     io.emit("npc.updated", runtimeNpc);
     emitWorldNpcMessage({
       author: "System",
@@ -1112,16 +1234,13 @@ io.on("connection", function (socket) {
 
   socket.on("resource.collect", (payload) => {
     if (!consumeRateLimit(socket, "resource.collect", 20, 10000)) return;
-    const resourceId =
-      typeof payload === "string"
-        ? payload.trim()
-        : typeof payload?.resourceId === "string"
-          ? payload.resourceId.trim()
-          : "";
+    const resourceId = normalizeRuntimeId(
+      typeof payload === "string" || typeof payload === "number"
+        ? payload
+        : payload?.resourceId
+    );
     const collectorEntityId =
-      typeof payload?.collectorEntityId === "string"
-        ? payload.collectorEntityId.trim()
-        : socket.id;
+      normalizeRuntimeId(payload?.collectorEntityId) || socket.id;
 
     if (!resourceId || !state.resources[resourceId]) {
       rejectEvent(socket, "resource.collect", "RESOURCE_NOT_FOUND", { resourceId });
@@ -1652,14 +1771,6 @@ io.on("connection", function (socket) {
     }
 
     const now = Date.now();
-    if (fromNpc.combatCooldownUntil && fromNpc.combatCooldownUntil > now) {
-      rejectEvent(socket, "npc.combat.attack", "ATTACK_COOLDOWN", {
-        fromNpcId,
-        cooldownRemainingMs: fromNpc.combatCooldownUntil - now,
-      });
-      return;
-    }
-
     const fromTile = resolveNpcRuntimeTile(fromNpc);
     const targetTile = resolveNpcRuntimeTile(targetNpc);
     const distance = getTileDistance(fromTile, targetTile);
@@ -1672,7 +1783,6 @@ io.on("connection", function (socket) {
       return;
     }
 
-    fromNpc.combatCooldownUntil = now + NPC_ATTACK_COOLDOWN_MS;
     targetNpc.hp = clampInteger(
       targetNpc.hp - NPC_ATTACK_DAMAGE,
       0,
@@ -1686,6 +1796,20 @@ io.on("connection", function (socket) {
       targetNpc.deadUntil = now + NPC_REVIVE_DELAY_MS;
     }
 
+    appendCombatEvent({
+      id: `combat-${now}-${Math.random().toString(36).slice(2, 8)}`,
+      type: "npc_attack",
+      createdAt: now,
+      attackerNpcId: fromNpc.id,
+      attackerNpcName: fromNpc.name,
+      targetNpcId: targetNpc.id,
+      targetNpcName: targetNpc.name,
+      damage: NPC_ATTACK_DAMAGE,
+      targetHp: targetNpc.hp,
+      targetMaxHp: NPC_MAX_HP,
+      targetAlive: targetNpc.alive,
+    });
+
     io.emit("npc.updated", targetNpc);
 
     emitWorldNpcMessage({
@@ -1696,6 +1820,16 @@ io.on("connection", function (socket) {
     });
 
     if (!targetNpc.alive) {
+      appendCombatEvent({
+        id: `combat-${now}-${Math.random().toString(36).slice(2, 8)}`,
+        type: "npc_downed",
+        createdAt: now,
+        attackerNpcId: fromNpc.id,
+        attackerNpcName: fromNpc.name,
+        targetNpcId: targetNpc.id,
+        targetNpcName: targetNpc.name,
+      });
+
       emitWorldNpcMessage({
         author: "System",
         message: `${targetNpc.name} 已被击倒，${Math.floor(

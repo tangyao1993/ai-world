@@ -7,6 +7,11 @@ export interface NpcSpawnPoint {
   y: number;
 }
 
+export interface NpcRuntimeTile {
+  x: number;
+  y: number;
+}
+
 export interface NpcSnapshot {
   id: string;
   name: string;
@@ -14,6 +19,7 @@ export interface NpcSnapshot {
   soul: string;
   personaTags: string[];
   spawn: NpcSpawnPoint;
+  runtimeTile?: NpcRuntimeTile;
   memorySummary: string;
   hp: number;
   alive: boolean;
@@ -37,6 +43,15 @@ export interface CreateNpcSnapshotInput
 export function createNpcSnapshot(
   input: CreateNpcSnapshotInput = {}
 ): NpcSnapshot {
+  const runtimeTile =
+    Number.isInteger(input.runtimeTile?.x) &&
+    Number.isInteger(input.runtimeTile?.y)
+      ? {
+          x: input.runtimeTile.x,
+          y: input.runtimeTile.y,
+        }
+      : undefined;
+
   return {
     id: input.id ?? "npc-unknown",
     name: input.name ?? "NPC",
@@ -47,8 +62,9 @@ export function createNpcSnapshot(
       x: input.spawn?.x ?? 0,
       y: input.spawn?.y ?? 0,
     },
+    runtimeTile,
     memorySummary: input.memorySummary ?? "",
-    hp: Number.isFinite(input.hp) ? Math.max(0, Math.floor(input.hp as number)) : 100,
+    hp: Number.isFinite(input.hp) ? Math.max(0, Math.floor(input.hp as number)) : 3,
     alive: typeof input.alive === "boolean" ? input.alive : true,
     inventory:
       input.inventory && typeof input.inventory === "object"

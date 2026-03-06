@@ -5,6 +5,7 @@ import {
   NpcAffinityByNpcId,
   NpcGender,
   NpcInventory,
+  NpcRuntimeTile,
   NpcSnapshot,
   NpcSpawnPoint,
 } from "../types/Npc";
@@ -19,6 +20,7 @@ export default class Npc extends Entity {
   soul: string = "";
   personaTags: string[] = [];
   spawn: NpcSpawnPoint = { x: 0, y: 0 };
+  runtimeTile?: NpcRuntimeTile;
   memorySummary: string = "";
   alive: boolean = true;
   inventory: NpcInventory = {};
@@ -34,19 +36,29 @@ export default class Npc extends Entity {
     this.hpText.setOrigin(0.5, 1.2);
     this.scene.add.existing(this.hpText);
     this.add(this.hpText);
-    this.applySnapshot(snapshot);
+    this.applySnapshot(snapshot, { syncPosition: true });
     this.nameText.setVisible(this.isNameAlwaysVisible);
     this.hpText.setVisible(true);
   }
 
-  public applySnapshot(snapshot: NpcSnapshot): void {
+  public applySnapshot(
+    snapshot: NpcSnapshot,
+    options: { syncPosition?: boolean } = {}
+  ): void {
+    const shouldSyncPosition = options.syncPosition !== false;
     this.id = snapshot.id;
     this.gender = snapshot.gender;
     this.soul = snapshot.soul;
     this.personaTags = [...snapshot.personaTags];
     this.spawn = { ...snapshot.spawn };
-    const spawnPosition = getTilePosition(snapshot.spawn.x, snapshot.spawn.y);
-    this.setPosition(spawnPosition.x, spawnPosition.y);
+    this.runtimeTile = snapshot.runtimeTile
+      ? { ...snapshot.runtimeTile }
+      : undefined;
+    if (shouldSyncPosition) {
+      const displayTile = this.runtimeTile || this.spawn;
+      const displayPosition = getTilePosition(displayTile.x, displayTile.y);
+      this.setPosition(displayPosition.x, displayPosition.y);
+    }
     this.memorySummary = snapshot.memorySummary;
     this.hp = snapshot.hp;
     this.alive = snapshot.alive;
@@ -64,6 +76,7 @@ export default class Npc extends Entity {
       soul: this.soul,
       personaTags: [...this.personaTags],
       spawn: { ...this.spawn },
+      runtimeTile: this.runtimeTile ? { ...this.runtimeTile } : undefined,
       memorySummary: this.memorySummary,
       hp: this.hp,
       alive: this.alive,
@@ -73,7 +86,7 @@ export default class Npc extends Entity {
   }
 
   private updateHpText(): void {
-    this.hpText.setText(`HP: ${Math.max(0, this.hp)}/100`);
+    this.hpText.setText(`HP: ${Math.max(0, this.hp)}/3`);
     this.hpText.setColor(this.alive ? "#ffb3b3" : "#808080");
   }
 }
