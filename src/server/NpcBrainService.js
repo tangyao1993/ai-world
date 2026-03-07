@@ -164,7 +164,7 @@ function buildSystemPrompt(promptPayload, maxActions) {
     "当 perception 里没有玩家、NPC、资源时，不要停机；应执行探索类动作（MOVE_TO/LOOK_AT/SAY/WAIT）。",
     "当 trigger.type=spawn 时，优先做符合“刚进入世界”的自然反应。",
     "world.recentWorldChatMessages 提供了世界聊天窗最近消息，可用于理解当前社交语境。",
-    "world.recentCombatEvents 提供了最近攻击/击倒/复活记录，可用于规避重复无效攻击并进行战斗决策。",
+    "world.recentCombatEvents 提供了最近攻击/击杀记录（被击杀的 NPC 会永久消失），可用于规避重复无效攻击并进行战斗决策。",
     "",
     "严格禁止使用错误字段，例如：action、duration、message、content。",
     "WAIT 只能使用 durationMs，单位毫秒，范围 100~30000。",

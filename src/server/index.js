@@ -44,7 +44,6 @@ const OBSERVER_MODE_ENABLED =
   String(process.env.WORLD_GOD_VIEW_MODE || "true").toLowerCase() !== "false";
 const NPC_MAX_HP = 3;
 const NPC_ATTACK_DAMAGE = 1;
-const NPC_REVIVE_DELAY_MS = 5000;
 const NPC_MAX_INVENTORY_ITEM_QUANTITY = 999;
 const NPC_AFFINITY_MAX = 100;
 const MAX_WORLD_EVENT_LENGTH = 240;
@@ -325,7 +324,6 @@ function ensureNpcRuntimeState(npc) {
   npc.combatCooldownUntil = Number.isInteger(npc.combatCooldownUntil)
     ? npc.combatCooldownUntil
     : 0;
-  npc.deadUntil = Number.isInteger(npc.deadUntil) ? npc.deadUntil : 0;
 
   return npc;
 }
@@ -981,6 +979,23 @@ const npcAutonomousRuntime = {
   lastDecisionAtByNpc: {},
 };
 
+function removeNpcFromState(npcId, options = {}) {
+  const normalizedNpcId = normalizeRuntimeId(npcId);
+  if (!normalizedNpcId || !state.npcs[normalizedNpcId]) return null;
+
+  const npc = state.npcs[normalizedNpcId];
+  delete state.npcs[normalizedNpcId];
+  delete state.npcOwners[normalizedNpcId];
+  delete npcAutonomousRuntime.inFlightByNpc[normalizedNpcId];
+  delete npcAutonomousRuntime.lastDecisionAtByNpc[normalizedNpcId];
+
+  if (options.emitRemoved !== false) {
+    io.emit("npc.removed", normalizedNpcId);
+  }
+
+  return npc;
+}
+
 function hasPendingExecutionForNpc(npcId) {
   return Object.values(npcObservability.pendingExecutions).some(
     (execution) => execution.npcId === npcId
@@ -1123,38 +1138,6 @@ function emitWorldNpcMessage({ author, message, npcId, npcName }) {
 
   io.emit("chat.newMessage", [payload]);
   appendWorldChatMessage(payload);
-}
-
-function tryReviveDeadNpcs() {
-  const now = Date.now();
-
-  Object.values(state.npcs).forEach((npc) => {
-    const runtimeNpc = ensureNpcRuntimeState(npc);
-    if (!runtimeNpc || runtimeNpc.alive) return;
-    if (!runtimeNpc.deadUntil || now < runtimeNpc.deadUntil) return;
-
-    runtimeNpc.hp = NPC_MAX_HP;
-    runtimeNpc.alive = true;
-    runtimeNpc.deadUntil = 0;
-    runtimeNpc.combatCooldownUntil = 0;
-
-    appendCombatEvent({
-      id: `combat-${now}-${Math.random().toString(36).slice(2, 8)}`,
-      type: "npc_revived",
-      createdAt: now,
-      npcId: runtimeNpc.id,
-      npcName: runtimeNpc.name,
-      hp: runtimeNpc.hp,
-    });
-
-    io.emit("npc.updated", runtimeNpc);
-    emitWorldNpcMessage({
-      author: "System",
-      message: `${runtimeNpc.name} 已复活（HP: ${runtimeNpc.hp}/${NPC_MAX_HP}）。`,
-      npcId: runtimeNpc.id,
-      npcName: runtimeNpc.name,
-    });
-  });
 }
 
 console.log("Alkito Server - Starting...");
@@ -1332,7 +1315,6 @@ io.on("connection", function (socket) {
       inventory: {},
       affinityByNpcId: {},
       combatCooldownUntil: 0,
-      deadUntil: 0,
     });
     state.npcOwners[sanitizedNpc.id] = socket.id;
     npcAutonomousRuntime.lastDecisionAtByNpc[sanitizedNpc.id] = 0;
@@ -1441,11 +1423,7 @@ io.on("connection", function (socket) {
       return;
     }
 
-    delete state.npcs[targetNpcId];
-    delete state.npcOwners[targetNpcId];
-    delete npcAutonomousRuntime.inFlightByNpc[targetNpcId];
-    delete npcAutonomousRuntime.lastDecisionAtByNpc[targetNpcId];
-    io.emit("npc.removed", targetNpcId);
+    removeNpcFromState(targetNpcId);
   });
 
   socket.on("npc.executeActions", (npcId, actions) => {
@@ -1793,7 +1771,6 @@ io.on("connection", function (socket) {
 
     if (targetNpc.hp <= 0) {
       targetNpc.alive = false;
-      targetNpc.deadUntil = now + NPC_REVIVE_DELAY_MS;
     }
 
     appendCombatEvent({
@@ -1810,8 +1787,6 @@ io.on("connection", function (socket) {
       targetAlive: targetNpc.alive,
     });
 
-    io.emit("npc.updated", targetNpc);
-
     emitWorldNpcMessage({
       author: fromNpc.name,
       message: `攻击了 ${targetNpc.name}，造成 ${NPC_ATTACK_DAMAGE} 点伤害（${targetNpc.hp}/${NPC_MAX_HP}）。`,
@@ -1819,10 +1794,14 @@ io.on("connection", function (socket) {
       npcName: fromNpc.name,
     });
 
-    if (!targetNpc.alive) {
+    if (targetNpc.alive) {
+      io.emit("npc.updated", targetNpc);
+    } else {
+      removeNpcFromState(targetNpc.id);
+
       appendCombatEvent({
         id: `combat-${now}-${Math.random().toString(36).slice(2, 8)}`,
-        type: "npc_downed",
+        type: "npc_killed",
         createdAt: now,
         attackerNpcId: fromNpc.id,
         attackerNpcName: fromNpc.name,
@@ -1832,9 +1811,7 @@ io.on("connection", function (socket) {
 
       emitWorldNpcMessage({
         author: "System",
-        message: `${targetNpc.name} 已被击倒，${Math.floor(
-          NPC_REVIVE_DELAY_MS / 1000
-        )} 秒后复活。`,
+        message: `${targetNpc.name} 已被 ${fromNpc.name} 击杀并永久消失。`,
         npcId: targetNpc.id,
         npcName: targetNpc.name,
       });
@@ -1934,14 +1911,7 @@ io.on("connection", function (socket) {
 
     Object.entries(state.npcOwners).forEach(([npcId, ownerSocketId]) => {
       if (ownerSocketId !== socket.id) return;
-      delete state.npcOwners[npcId];
-
-      if (state.npcs[npcId]) {
-        delete state.npcs[npcId];
-        delete npcAutonomousRuntime.inFlightByNpc[npcId];
-        delete npcAutonomousRuntime.lastDecisionAtByNpc[npcId];
-        io.emit("npc.removed", npcId);
-      }
+      removeNpcFromState(npcId);
     });
 
     clearPendingExecutionsByOwner(socket.id);
@@ -2051,7 +2021,6 @@ setInterval(() => {
 
 setInterval(() => {
   void runNpcAutonomousLoop();
-  tryReviveDeadNpcs();
 }, NPC_AUTONOMOUS_TICK_MS);
 
 setInterval(() => {
